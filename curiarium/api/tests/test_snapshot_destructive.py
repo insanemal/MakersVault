@@ -17,6 +17,7 @@ that must (not) have happened for each row.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -65,6 +66,10 @@ def isolated_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREBULK", "strict")
     monkeypatch.setattr(config, "SNAPSHOT_REQUIRE_CAPABILITY", False)
 
+    # A burst of folder deletes coalesces through module-global state, so no test
+    # may inherit a remembered snapshot from another.
+    snapshot_guard._REUSE.clear()
+
     # The schema is created by the app lifespan; a single-file run needs it first.
     run_migrations(engine)
     with Session(engine) as session:
@@ -72,6 +77,7 @@ def isolated_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         assets_before = {asset.id for asset in session.exec(select(Asset))}
         files_before = {row.id for row in session.exec(select(AssetFile))}
     yield storage
+    snapshot_guard._REUSE.clear()
     with Session(engine) as session:
         for row in list(session.exec(select(AssetFile))):
             if row.id not in files_before:
@@ -162,6 +168,16 @@ def insert_asset_row(
         return asset.id
 
 
+def insert_folder_row(name: str, storage_path: Optional[str] = None) -> str:
+    """A folder row with no directory on disk, the shape a scan leaves behind."""
+    folder = Folder(name=name, storage_path=storage_path)
+    with Session(engine) as session:
+        session.add(folder)
+        session.commit()
+        session.refresh(folder)
+        return folder.id
+
+
 def created_folder(client: TestClient, headers: dict, name: str) -> dict:
     response = client.post("/folders", json={"name": name, "tags": [], "parent_id": None}, headers=headers)
     assert response.status_code == 200, response.text
@@ -191,8 +207,8 @@ def spy_guard(monkeypatch: pytest.MonkeyPatch) -> dict:
     recorded: dict = {}
     real = snapshot_guard.guard
 
-    def wrapper(reason, target, *, ctx):
-        notice = real(reason, target, ctx=ctx)
+    def wrapper(reason, target, *, ctx, has_work=True):
+        notice = real(reason, target, ctx=ctx, has_work=has_work)
         recorded.update(reason=reason, target=target, notice=notice)
         return notice
 
@@ -561,6 +577,211 @@ def test_a_bulk_delete_takes_one_snapshot_for_the_whole_selection(isolated_stora
     # The per-asset action still names each id, as before.
     assert sorted(row.target for row in rows if row.action == audit.ASSET_DELETE) == sorted(asset_ids)
     assert provider.calls == [(PRE_BULK, None)]
+
+
+# --- Mf-c0a5: one snapshot per gesture, and none for an empty one ----------
+
+
+def test_a_burst_of_folder_deletes_cuts_one_snapshot(isolated_storage: Path, client, monkeypatch) -> None:
+    """Six clicks, six requests, one snapshot: the burst is a single gesture."""
+    storage = isolated_storage
+    provider = snapshot_fakes.use_provider(monkeypatch, storage)
+    # One instant for the whole burst: the window cannot expire mid-test on a slow
+    # box, so one snapshot is the only possible outcome here.
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: 1000.0)
+    headers = admin_headers(client)
+    folders = []
+    for index in range(6):
+        folder = created_folder(client, headers, f"Shelf {index}")
+        write_placeholder_file(storage / f"Shelf {index}" / "model.stl", b"model bytes")
+        insert_asset_row(f"model {index}", folder["id"], f"Shelf {index}/model.stl")
+        folders.append(folder)
+
+    names = []
+    for index, folder in enumerate(folders):
+        value = request_id_for(f"burst-{index}")
+        response = client.delete(
+            f"/folder/{folder['id']}",
+            params={"confirm_name": folder["name"]},
+            headers=admin_headers(client, value),
+        )
+        assert response.status_code == 200, response.text
+        notice = response.json()["snapshot"]
+        # A real byte-removing delete always gets a snapshot, coalesced or not.
+        assert notice["action"] == "snapshot"
+        assert notice["name"] is not None
+        names.append(notice["name"])
+        rows = events_for(value)
+        assert sorted(row.action for row in rows) == sorted([audit.DESTRUCTIVE_SNAPSHOT_TAKEN, audit.FOLDER_DELETE])
+        taken = destructive_rows(value)[0]
+        assert detail_of(taken)["name"] == names[0]
+        assert detail_of(taken)["reused"] == (index > 0)
+
+    assert provider.calls == [(PRE_DELETE, None)], "one snapshot for a six-request gesture"
+    assert len(set(names)) == 1, names
+    for folder in folders:
+        assert not (storage / folder["name"]).exists(), "every folder is gone from disk"
+    assert [snapshot.name for snapshot in provider.list()] == [names[0]], "the snapshot survives the burst"
+
+
+def test_an_empty_trash_takes_no_snapshot_and_writes_only_its_own_row(
+    isolated_storage: Path, client, monkeypatch
+) -> None:
+    storage = isolated_storage
+    provider = snapshot_fakes.use_provider(monkeypatch, storage)
+    value = request_id_for("empty-trash")
+
+    response = client.post("/trash/purge", headers=admin_headers(client, value))
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"purged": 0, "bytes": 0, "failed": []}
+    assert provider.calls == []
+    assert provider.list() == []
+    rows = events_for(value)
+    assert [row.action for row in rows] == [audit.TRASH_PURGE], [row.action for row in rows]
+    assert detail_of(rows[0]) == {"purged": 0, "bytes": 0, "failed": []}
+
+
+def test_a_purge_with_an_empty_selection_takes_no_snapshot(isolated_storage: Path, client, monkeypatch) -> None:
+    """An entry too young to purge is nothing to act on: it waits for the next run."""
+    storage = isolated_storage
+    provider = snapshot_fakes.use_provider(monkeypatch, storage)
+    entry = trash_entry(storage)
+    value = request_id_for("empty-selection")
+
+    response = client.post("/trash/purge", params={"older_than_days": 1}, headers=admin_headers(client, value))
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"purged": 0, "bytes": 0, "failed": []}
+    assert entry.is_dir(), "the entry was outside the selection and survives"
+    assert provider.calls == []
+    assert provider.list() == []
+    rows = events_for(value)
+    assert [row.action for row in rows] == [audit.TRASH_PURGE], [row.action for row in rows]
+    assert detail_of(rows[0])["purged"] == 0
+
+
+def test_a_folder_delete_with_nothing_to_act_on_takes_no_snapshot(
+    isolated_storage: Path, client, monkeypatch
+) -> None:
+    """An empty directory holds no bytes, and a path-less folder holds none either."""
+    storage = isolated_storage
+    provider = snapshot_fakes.use_provider(monkeypatch, storage)
+    headers = admin_headers(client)
+    # A scan-created folder whose directory never materialised.
+    ghost = insert_folder_row("Ghost")
+    # A folder whose directory exists, and is empty.
+    empty = created_folder(client, headers, "Empty")
+
+    for folder_id, name in ((ghost, "Ghost"), (empty["id"], "Empty")):
+        value = request_id_for(f"no-bytes-{name}")
+        response = client.delete(
+            f"/folder/{folder_id}", params={"confirm_name": name}, headers=admin_headers(client, value)
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["snapshot"]["action"] == "proceed_without"
+        rows = events_for(value)
+        assert [row.action for row in rows] == [audit.FOLDER_DELETE], [row.action for row in rows]
+        assert detail_of(rows[0])["bytes"] == 0
+        assert destructive_rows(value) == []
+
+    assert provider.calls == []
+    assert provider.list() == []
+
+
+def test_strict_still_refuses_a_byte_removing_delete_inside_an_open_window(
+    isolated_storage: Path, client, monkeypatch
+) -> None:
+    """A real byte-removing operation is never skipped and never escapes the refusal."""
+    storage = isolated_storage
+    provider = snapshot_fakes.use_provider(monkeypatch, storage)
+    # One instant keeps the coalescing window open for the whole test.
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: 1000.0)
+    headers = admin_headers(client)
+    seeded_folder = created_folder(client, headers, "Shelf")
+    write_placeholder_file(storage / "Shelf" / "model.stl", b"model bytes")
+    insert_asset_row("model", seeded_folder["id"], "Shelf/model.stl")
+    seeded = request_id_for("open-window-seed")
+    response = client.delete(
+        f"/folder/{seeded_folder['id']}", params={"confirm_name": "Shelf"}, headers=admin_headers(client, seeded)
+    )
+    assert response.status_code == 200, response.text
+    seeded_name = response.json()["snapshot"]["name"]
+    assert seeded_name is not None
+
+    # The volume cannot snapshot any more, and the operator demands one.
+    snapshot_fakes.use_unavailable(monkeypatch)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "strict")
+    monkeypatch.setattr(config, "SNAPSHOT_REQUIRE_CAPABILITY", True)
+    doomed = created_folder(client, headers, "Doomed")
+    write_placeholder_file(storage / "Doomed" / "model.stl", b"doomed bytes")
+    insert_asset_row("doomed", doomed["id"], "Doomed/model.stl")
+    before = storage_state(storage)
+    value = request_id_for("open-window-refusal")
+
+    response = client.delete(
+        f"/folder/{doomed['id']}", params={"confirm_name": "Doomed"}, headers=admin_headers(client, value)
+    )
+
+    assert response.status_code == 409, response.text
+    assert storage_state(storage) == before, "a refused delete moves nothing"
+    rows = events_for(value)
+    assert [row.action for row in rows] == [audit.DESTRUCTIVE_SNAPSHOT_MISSED], [row.action for row in rows]
+    assert detail_of(rows[0])["cause"] == "unavailable"
+    assert provider.calls == [(PRE_DELETE, None)], "the open window never rescued the refusal"
+
+    # Capability back: the same open window serves the snapshot, never a skip.
+    available = snapshot_fakes.use_provider(monkeypatch, storage)
+    third = created_folder(client, headers, "Third")
+    write_placeholder_file(storage / "Third" / "model.stl", b"third bytes")
+    insert_asset_row("third", third["id"], "Third/model.stl")
+    third_value = request_id_for("open-window-reuse")
+
+    response = client.delete(
+        f"/folder/{third['id']}", params={"confirm_name": "Third"}, headers=admin_headers(client, third_value)
+    )
+
+    assert response.status_code == 200, response.text
+    notice = response.json()["snapshot"]
+    assert notice["action"] == "snapshot"
+    assert notice["name"] == seeded_name
+    assert available.calls == [], "a reuse creates nothing"
+    assert detail_of(destructive_rows(third_value)[0])["reused"] is True
+
+
+def test_a_folder_delete_of_an_unreadable_directory_still_takes_a_snapshot(
+    isolated_storage: Path, client, monkeypatch
+) -> None:
+    """An unreadable directory may hide bytes, so the guard still runs.
+
+    A folder with no tracked asset but a directory entry the process may not
+    read is the Mf-c2gw ownership shape. `folder_delete_holds_bytes` must assume
+    bytes there, so the snapshot is taken and the route's own answer -- its 409,
+    or the rename it can still perform -- decides, instead of the helper turning
+    the delete into a bare 500.
+    """
+    storage = isolated_storage
+    provider = snapshot_fakes.use_provider(monkeypatch, storage)
+    headers = admin_headers(client)
+    folder = created_folder(client, headers, "Sealed")
+    sealed = storage / "Sealed"
+    real_scandir = os.scandir
+
+    def selective(path):
+        if Path(path) == sealed:
+            raise PermissionError(13, "Permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", selective)
+    value = request_id_for("unreadable")
+
+    response = client.delete(
+        f"/folder/{folder['id']}", params={"confirm_name": "Sealed"}, headers=admin_headers(client, value)
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["snapshot"]["action"] == "snapshot"
+    assert provider.calls == [(PRE_DELETE, None)], "a directory we cannot read is not 'nothing'"
 
 
 # --- the bulk delete preview ------------------------------------------------

@@ -125,6 +125,18 @@ SNAPSHOT_POLICY_PREPURGE = env_policy("SNAPSHOT_POLICY_PREPURGE", os.getenv("SNA
 SNAPSHOT_POLICY_PREBULK = env_policy("SNAPSHOT_POLICY_PREBULK", os.getenv("SNAPSHOT_POLICY_PREBULK", "strict"), "strict")
 SNAPSHOT_REQUIRE_CAPABILITY = env_bool("SNAPSHOT_REQUIRE_CAPABILITY", False)
 
+# Snapshot coalescing for a burst of folder deletes (Mf-c0a5). The folder tree
+# deletes one folder per request, so six clicks used to cut six snapshots and
+# spend six retention slots on one gesture. A follow-on folder delete that
+# starts within this many seconds of the previous predelete snapshot reuses it
+# instead. The window is anchored to the snapshot's own creation instant and a
+# reuse never extends it, so a chain of deletes cannot keep one snapshot alive
+# past this bound. 0 disables coalescing and restores one snapshot per delete.
+# Only folder deletes coalesce: they rename bytes into `.trash` under the same
+# root and unlink nothing, and the purge that does unlink always takes its own
+# fresh per-request snapshot.
+SNAPSHOT_COALESCE_SECONDS = 10
+
 # Scheduled library snapshots (S8). The thread starts from `main.lifespan` only
 # when this is true, so a deployment that never opted in takes no snapshot
 # behind the operator's back. The defaults are the documented ones: daily, a

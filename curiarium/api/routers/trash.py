@@ -35,9 +35,13 @@ def purge_trash(
     context: Optional[AuthContext] = Depends(require_admin),
 ):
     ctx = audit.context_for(request, context)
+    # Select first: an empty selection is nothing to act on, so no pre-operation
+    # snapshot is taken and the purge then removes exactly this selection. An entry
+    # that appears after the selection waits for the next purge and its own snapshot.
+    entries = trash_service.purge_selection(older_than_days)
     # Before the purge: a refused purge must have removed nothing.
-    snapshot_guard.guard(snapshots.SnapshotReason.PRE_PURGE, "trash", ctx=ctx)
-    result = trash_service.purge(older_than_days)
+    snapshot_guard.guard(snapshots.SnapshotReason.PRE_PURGE, "trash", ctx=ctx, has_work=bool(entries))
+    result = trash_service.purge(older_than_days, selection=entries)
     # The bytes are already gone and there is no row to roll back: fail-loud.
     audit.record(audit.Event(audit.TRASH_PURGE, "trash", dict(result)), ctx=ctx)
     return TrashPurgeOut(**result)

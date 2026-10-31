@@ -104,7 +104,7 @@ could honestly reconstruct.
 | `snapshot.prune` | `POST /snapshots` (emitted by retention inside `create()` in `snapshots.py`, one row per pruned snapshot) | pruned snapshot name | `{"rule", "trigger"}` | fail-loud |
 | `snapshot.delete` | `DELETE /snapshots/{name}` | snapshot name | `{"method"}` | fail-loud |
 | `snapshot.restore` | `POST /snapshots/{name}/restore` | snapshot name | `{"path", "destination", "files", "bytes", "scan_started"}` | fail-loud |
-| `destructive.snapshot_taken` | `DELETE /folder/{folder_id}`; `POST /trash/purge`; `POST /assets/batch/delete`; written by `snapshot_guard.guard` | the operation's subject: the folder id, `"trash"` or `"assets"` | `{"reason", "policy", "name", "method", "pruned"}` - `name` is the snapshot's exact name and `pruned` is how many snapshots this create's retention removed | fail-loud |
+| `destructive.snapshot_taken` | `DELETE /folder/{folder_id}`; `POST /trash/purge`; `POST /assets/batch/delete`; written by `snapshot_guard.guard` | the operation's subject: the folder id, `"trash"` or `"assets"` | `{"reason", "policy", "name", "method", "pruned", "reused"}` - `name` is the snapshot's exact name and `pruned` is how many snapshots this create's retention removed; `reused` is `true` when this request reused a snapshot an immediately preceding folder delete took, and `pruned` is then `0` | fail-loud |
 | `destructive.snapshot_missed` | the same three routes, when no snapshot was taken | the same subject | `{"reason", "policy", "cause", "error"}` - `cause` is `"unavailable"` or `"failed"`, `error` is the exception text or `null` | fail-loud |
 | `snapshot.schedule.skipped` | written by `snapshot_schedule.run_once` when the scheduled tick was due but the volume cannot snapshot; no route emits it | `"snapshot_schedule"` | `{"cause", "method", "hours"}` | logged; the tick continues |
 | `snapshot.schedule.failed` | the same tick, when taking the snapshot raised; no route emits it | `"snapshot_schedule"` | `{"cause", "method", "hours"}` | logged; the tick continues |
@@ -164,8 +164,15 @@ change more than one fact or act on more than one target:
   snapshot that retention removed in the same call.
 * `DELETE /folder/{folder_id}` - one `destructive.snapshot_taken` (or
   `destructive.snapshot_missed`) row before the delete, then `folder.delete`.
+  A folder delete that starts inside the coalescing window reuses the previous
+  predelete snapshot instead of cutting another: its row names that snapshot
+  with `"reused": true`, so the burst still owns one row per request and one
+  snapshot per gesture. A request with nothing to act on (an empty directory, a
+  path-less folder) writes no `destructive.*` row at all: its own
+  `folder.delete`/`trash.purge` row with zero counts is the record.
 * `POST /trash/purge` - one `destructive.snapshot_*` row before the purge, then
-  `trash.purge`.
+  `trash.purge`. An empty selection takes no snapshot, so that request writes
+  `trash.purge` alone.
 * `POST /assets/batch/delete` - one `destructive.snapshot_*` row, then one
   `asset.delete` per asset.
 * `POST /assets/batch/folder` - one `asset.move` per moved asset.
@@ -190,6 +197,18 @@ whether the library volume can snapshot, takes one through S2's provider layer
 when it can, and writes exactly one `destructive.snapshot_taken` or
 `destructive.snapshot_missed` row either way. A single-asset delete takes no
 snapshot: the trash keeps it restorable, so it stays `asset.delete` alone.
+
+Two qualifications, both about what one request owes the log. A folder delete
+inside `SNAPSHOT_COALESCE_SECONDS` of the previous predelete snapshot reuses it,
+and its row says so with `"reused": true` and `"pruned": 0`: a burst of folder
+deletes is one gesture but N requests, so it earns one snapshot and still one
+row per request. And a request with nothing to act on - an empty trash, an empty
+purge selection, a folder delete that displaces no byte - writes no
+`destructive.*` row at all, because there is no destruction to record; its own
+`folder.delete`/`trash.purge` row with zero counts is the honest record. Neither
+qualification ever skips a real byte-removing operation: a delete that would
+move or unlink a byte always guards, and a refusal still comes before any
+mutation.
 
 ## Audited vs exempt routes
 

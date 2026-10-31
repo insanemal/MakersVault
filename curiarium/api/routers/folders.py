@@ -85,7 +85,10 @@ def delete_folder(
         if seams.scan_status().get("running"):
             raise HTTPException(status_code=409, detail="A library scan is running; try again when it finishes")
         notice = snapshot_guard.guard(
-            snapshots.SnapshotReason.PRE_DELETE, folder_id, ctx=audit.context_for(request, context)
+            snapshots.SnapshotReason.PRE_DELETE,
+            folder_id,
+            ctx=audit.context_for(request, context),
+            has_work=trash_service.folder_delete_holds_bytes(s, folder),
         )
         result = trash_service.trash_folder(s, folder, audit_ctx=audit.context_for(request, context))
     return {"ok": True, **result, "snapshot": notice}

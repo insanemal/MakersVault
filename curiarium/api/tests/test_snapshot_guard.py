@@ -13,6 +13,8 @@ and `test_audit_log.py`, where a database already exists.
 """
 
 import datetime as dt
+import time
+from pathlib import Path
 
 import pytest
 import snapshot_fakes
@@ -57,6 +59,15 @@ def storage_root(tmp_path, monkeypatch: pytest.MonkeyPatch):
     root.mkdir()
     monkeypatch.setattr(db, "STORAGE", root)
     return root
+
+
+@pytest.fixture(autouse=True)
+def fresh_coalescing(monkeypatch: pytest.MonkeyPatch):
+    """No test inherits a remembered snapshot or a stepped clock from another."""
+    monkeypatch.setattr(snapshot_guard, "_now", time.monotonic)
+    snapshot_guard._REUSE.clear()
+    yield
+    snapshot_guard._REUSE.clear()
 
 
 def capture_audit(monkeypatch: pytest.MonkeyPatch) -> list[audit.Event]:
@@ -242,6 +253,7 @@ def test_guard_writes_one_taken_row_naming_the_snapshot(monkeypatch: pytest.Monk
         "name": notice.name,
         "method": provider.method,
         "pruned": 0,
+        "reused": False,
     }
 
 
@@ -294,6 +306,224 @@ def test_guard_without_a_context_writes_no_row_on_a_miss_either(monkeypatch: pyt
     assert rows == []
     assert notice.action == "proceed_without"
     assert notice.capability == "unavailable"
+
+
+# --- coalescing a burst of folder deletes (Mf-c0a5) -------------------------
+
+
+def install_provider(
+    monkeypatch: pytest.MonkeyPatch, root: Path, **provider_kwargs
+) -> snapshot_fakes.ScriptedProvider:
+    """A scripted provider on `root` with its own retention policy, capability available."""
+    (Path(root) / snapshots.SNAPSHOT_DIRNAME).mkdir(parents=True, exist_ok=True)
+    provider = snapshot_fakes.ScriptedProvider(root, **provider_kwargs)
+    monkeypatch.setattr(snapshots, "provider_for", lambda *args, **kwargs: provider)
+    snapshot_fakes.use_capability(monkeypatch)
+    return provider
+
+
+def test_only_the_folder_delete_coalesces() -> None:
+    """A folder delete unlinks nothing; a purge and a bulk delete do."""
+    assert snapshot_guard.COALESCING_REASONS == {snapshots.SnapshotReason.PRE_DELETE}
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [snapshots.SnapshotReason.PRE_PURGE, snapshots.SnapshotReason.PRE_BULK],
+    ids=reason_id,
+)
+def test_a_purge_or_a_bulk_delete_never_reuses_a_snapshot(
+    reason: snapshots.SnapshotReason, monkeypatch: pytest.MonkeyPatch, storage_root
+) -> None:
+    """Two destructive requests, one instant, and still two snapshots."""
+    rows = capture_audit(monkeypatch)
+    provider = snapshot_fakes.use_provider(monkeypatch, storage_root)
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: 1000.0)
+
+    first = snapshot_guard.guard(reason, "trash", ctx=CTX)
+    second = snapshot_guard.guard(reason, "trash", ctx=CTX)
+
+    assert len(provider.calls) == 2
+    assert first.name != second.name
+    assert [row.detail["reused"] for row in rows] == [False, False]
+
+
+def test_a_follow_on_folder_delete_inside_the_window_reuses_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch, storage_root
+) -> None:
+    rows = capture_audit(monkeypatch)
+    provider = snapshot_fakes.use_provider(monkeypatch, storage_root)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "warn")
+    clock = [1000.0]
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: clock[0])
+
+    first = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-a", ctx=CTX)
+    clock[0] += 5.0
+    second = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-b", ctx=CTX)
+
+    assert provider.calls == [(snapshots.SnapshotReason.PRE_DELETE, None)], "one create for the whole burst"
+    assert second.action == "snapshot"
+    assert second.capability == "available"
+    assert second.name == first.name
+    assert [row.action for row in rows] == [audit.DESTRUCTIVE_SNAPSHOT_TAKEN] * 2
+    assert rows[0].detail["reused"] is False
+    assert rows[1].target == "folder-b"
+    assert rows[1].detail == {
+        "reason": "predelete",
+        "policy": "warn",
+        "name": first.name,
+        "method": provider.method,
+        "pruned": 0,
+        "reused": True,
+    }
+
+
+def test_the_window_is_anchored_to_the_snapshot_and_a_reuse_never_extends_it(
+    monkeypatch: pytest.MonkeyPatch, storage_root
+) -> None:
+    """Three deletes 6s apart at a 10s window cut two snapshots, not one per delete."""
+    rows = capture_audit(monkeypatch)
+    provider = snapshot_fakes.use_provider(monkeypatch, storage_root)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "warn")
+    monkeypatch.setattr(config, "SNAPSHOT_COALESCE_SECONDS", 10)
+    clock = [0.0]
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: clock[0])
+
+    names = []
+    for step in range(4):
+        notice = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, f"folder-{step}", ctx=CTX)
+        names.append(notice.name)
+        clock[0] += 6.0
+
+    # t=0 creates, t=6 reuses, t=12 is outside the anchor and creates, t=18 reuses that one.
+    assert len(provider.calls) == 2
+    assert names[0] == names[1]
+    assert names[2] != names[0]
+    assert names[2] == names[3]
+    assert [row.detail["reused"] for row in rows] == [False, True, False, True]
+
+
+def test_a_zero_window_restores_one_snapshot_per_delete(monkeypatch: pytest.MonkeyPatch, storage_root) -> None:
+    rows = capture_audit(monkeypatch)
+    provider = snapshot_fakes.use_provider(monkeypatch, storage_root)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "warn")
+    monkeypatch.setattr(config, "SNAPSHOT_COALESCE_SECONDS", 0)
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: 1000.0)
+
+    first = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-a", ctx=CTX)
+    second = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-b", ctx=CTX)
+
+    assert len(provider.calls) == 2
+    assert first.name != second.name
+    assert [row.detail["reused"] for row in rows] == [False, False]
+
+
+def test_a_snapshot_gone_from_the_store_forces_a_fresh_create(
+    monkeypatch: pytest.MonkeyPatch, storage_root
+) -> None:
+    """A remembered name is only a hint: `provider.list()` has the last word."""
+    rows = capture_audit(monkeypatch)
+    provider = snapshot_fakes.use_provider(monkeypatch, storage_root)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "warn")
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: 1000.0)
+
+    first = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-a", ctx=CTX)
+    assert first.name is not None
+    provider.delete(first.name)
+    second = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-b", ctx=CTX)
+
+    assert len(provider.calls) == 2
+    assert second.name != first.name
+    assert rows[-1].detail["reused"] is False
+    assert [snapshot.name for snapshot in provider.list()] == [second.name]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        snapshots.RetentionPolicy(keep_last_n=1, keep_daily=0, max_age_days=3650, hard_cap=10),
+        snapshots.RetentionPolicy(keep_last_n=10, keep_daily=0, max_age_days=3650, hard_cap=1),
+    ],
+    ids=["keep-last-1", "hard-cap-1"],
+)
+def test_a_retention_policy_without_headroom_forces_a_fresh_create(
+    policy: snapshots.RetentionPolicy, monkeypatch: pytest.MonkeyPatch, storage_root
+) -> None:
+    """One concurrent create could evict the remembered snapshot: never reuse it."""
+    rows = capture_audit(monkeypatch)
+    provider = install_provider(monkeypatch, storage_root, policy=policy)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "warn")
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: 1000.0)
+
+    first = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-a", ctx=CTX)
+    second = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-b", ctx=CTX)
+
+    assert len(provider.calls) == 2
+    assert first.name != second.name
+    assert [row.detail["reused"] for row in rows] == [False, False]
+
+
+def test_a_snapshot_with_no_room_above_it_in_the_policy_forces_a_fresh_create(
+    monkeypatch: pytest.MonkeyPatch, storage_root
+) -> None:
+    """Room is counted, not assumed: one newer snapshot can fill a keep_last_n of 2."""
+    rows = capture_audit(monkeypatch)
+    policy = snapshots.RetentionPolicy(keep_last_n=2, keep_daily=0, max_age_days=3650, hard_cap=10)
+    provider = install_provider(monkeypatch, storage_root, policy=policy)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "warn")
+    monkeypatch.setattr(snapshot_guard, "_now", lambda: 1000.0)
+
+    first = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-a", ctx=CTX)
+    # One snapshot lands above the remembered one (a later instant, so the store
+    # order is unambiguous), and one more create would then push it out of
+    # `keep_last_n`.
+    monkeypatch.setattr(snapshots, "_now", lambda: dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=2))
+    provider.create(snapshots.SnapshotReason.MANUAL, ctx=None)
+    second = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-b", ctx=CTX)
+
+    assert second.name != first.name
+    assert rows[-1].detail["reused"] is False
+
+
+def test_nothing_to_act_on_takes_no_snapshot_and_writes_no_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No destruction to record: the request's own zero counts are the record."""
+    rows = capture_audit(monkeypatch)
+    snapshot_fakes.use_capability(monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a request with nothing to act on must not construct a provider")
+
+    monkeypatch.setattr(snapshots, "provider_for", boom)
+
+    notice = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-empty", ctx=CTX, has_work=False)
+
+    assert rows == []
+    assert notice.action == "proceed_without"
+    assert notice.capability == "available"
+    assert notice.name is None
+    assert notice.detail == snapshot_guard.NOTHING_TO_ACT_ON
+
+
+def test_nothing_to_act_on_never_refuses_whatever_the_policy_says(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strict plus the operator switch refuses a destruction, not an empty one."""
+    rows = capture_audit(monkeypatch)
+    snapshot_fakes.use_unavailable(monkeypatch)
+    monkeypatch.setattr(config, "SNAPSHOT_POLICY_PREDELETE", "strict")
+    monkeypatch.setattr(config, "SNAPSHOT_REQUIRE_CAPABILITY", True)
+
+    notice = snapshot_guard.guard(snapshots.SnapshotReason.PRE_DELETE, "folder-empty", ctx=CTX, has_work=False)
+
+    assert rows == []
+    assert notice.action == "proceed_without"
+    assert notice.capability == "unavailable"
+    assert notice.detail == snapshot_fakes.UNUSABLE.reason
+
+
+def test_the_coalescing_window_defaults_to_ten_seconds() -> None:
+    """A hardcoded budget, not an environment key: `SNAPSHOT_BTRFS_TIMEOUT_SECONDS`' shape."""
+    assert config.SNAPSHOT_COALESCE_SECONDS == 10
+    assert isinstance(config.SNAPSHOT_COALESCE_SECONDS, int)
+    assert not isinstance(config.SNAPSHOT_COALESCE_SECONDS, bool)
 
 
 # --- config.env_policy ------------------------------------------------------

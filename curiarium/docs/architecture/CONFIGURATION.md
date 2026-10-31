@@ -529,6 +529,20 @@ is a recorded fact rather than a silent one. A real failure while taking a
 snapshot is never a capability miss: a path defect, a name collision or a
 vanished `.snap` directory is refused under `strict` and reported under `warn`.
 
+Folder deletes coalesce. A folder delete that starts within
+`SNAPSHOT_COALESCE_SECONDS` (10 seconds, hardcoded rather than an environment
+key -- the same shape as `SNAPSHOT_BTRFS_TIMEOUT_SECONDS`) of the previous
+predelete snapshot reuses that snapshot instead of cutting another one. The
+window is anchored absolutely to the snapshot's own creation instant, so a chain
+of deletes cannot keep one snapshot alive past it, and a reuse happens only
+after the guard proves the snapshot still exists and that retention cannot evict
+it on one concurrent create. Only folder deletes coalesce: a folder delete
+renames bytes into `.trash` under the same library root and unlinks nothing,
+while the purge that does unlink takes its own fresh, per-request snapshot, as
+does the bulk delete. An operation with nothing to act on -- an empty trash, an
+empty purge selection, a folder delete that displaces no byte -- takes no
+snapshot at all, and writes no `destructive.*` row.
+
 ## Scheduled snapshots
 
 S8 (`curiarium/api/snapshot_schedule.py`) is the slice that takes them on a

@@ -212,6 +212,44 @@ def folder_delete_preview(session: Session, folder: Folder) -> dict:
     }
 
 
+def folder_delete_holds_bytes(session: Session, folder: Folder) -> bool:
+    """Whether deleting this folder would displace or destroy any byte.
+
+    Conservative on purpose: a tracked asset counts even when its file is zero
+    bytes, because there is still a file to move, and supporting files count
+    too. Any entry inside the directory counts, so untracked bytes below the top
+    level make this true as well. Only a folder no preview can see bytes in --
+    no tracked assets, a storage path that is empty, or a directory that is
+    missing or empty -- is reported as holding nothing.
+    """
+    preview = folder_delete_preview(session, folder)
+    if preview["assets"] or preview["files"] or preview["bytes"]:
+        return True
+    relative = folder.storage_path
+    if not relative:
+        # A legacy metadata-only row: the scan wrote these before it recorded
+        # paths, and heals them on the next scan. The delete converges a path
+        # for it, so this helper claims nothing about it; anything such a delete
+        # does rename moves into `.trash` and is covered by the purge's own
+        # fresh snapshot.
+        return False
+    try:
+        directory = resolve_inside_storage(relative)
+    except HTTPException:
+        # The delete's own refusal is not this helper's call: assume bytes and
+        # let the route raise the refusal it already raises.
+        return True
+    if not directory.is_dir():
+        return False
+    try:
+        with os.scandir(directory) as entries:
+            return next(entries, None) is not None
+    except OSError:
+        # An unreadable directory is the delete's own 409 (Mf-c2gw), not this
+        # helper's verdict: assume it holds bytes and let the route answer.
+        return True
+
+
 # Moves ----------------------------------------------------------
 
 
@@ -686,7 +724,33 @@ def list_entries() -> list[dict]:
     return entries
 
 
-def purge(older_than_days: Optional[int] = None) -> dict:
+def purge_selection(older_than_days: Optional[int] = None) -> list[Path]:
+    """The direct children of ``.trash`` a purge would remove right now, removing nothing.
+
+    Same rules as ``purge``: direct children only, symlinks skipped so a planted
+    link can never make the purge reach into the live library, and the age test
+    strictly ``mtime < cutoff``. A missing ``.trash`` is an empty selection. An
+    entry whose ``stat()`` fails is left out: it cannot be age-tested, so it is
+    not destroyed without a fresh pre-purge snapshot.
+    """
+    root = trash_root()
+    if not root.is_dir():
+        return []
+    cutoff = None if older_than_days is None else time.time() - older_than_days * SECONDS_PER_DAY
+    selection: list[Path] = []
+    for child in sorted(root.iterdir(), key=lambda item: item.name):
+        try:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            if cutoff is not None and child.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        selection.append(child)
+    return selection
+
+
+def purge(older_than_days: Optional[int] = None, *, selection: Optional[list[Path]] = None) -> dict:
     """Irreversibly remove trash entries, all of them or only the old ones.
 
     Only direct children of ``.trash`` are considered, symlinks are skipped so a
@@ -694,25 +758,21 @@ def purge(older_than_days: Optional[int] = None) -> dict:
     age test is strictly ``mtime < cutoff``: an entry touched at or after the
     cutoff survives. Size is summed before removal so the reported ``bytes`` is
     what was actually reclaimed.
-    """
-    root = trash_root()
-    if not root.is_dir():
-        return {"purged": 0, "bytes": 0, "failed": []}
 
-    cutoff = None if older_than_days is None else time.time() - older_than_days * SECONDS_PER_DAY
+    ``selection`` is the select-then-purge contract: a caller that has a
+    pre-purge snapshot to take asks ``purge_selection`` first, guards on whether
+    it is empty, and then passes exactly that list here. Nothing is destroyed
+    that the snapshot did not cover, and an entry that appears after the
+    selection waits for the next purge and its own snapshot. Without a
+    ``selection`` the two steps are one, which is what a direct caller gets.
+    """
+    if selection is None:
+        selection = purge_selection(older_than_days)
+
     purged = 0
     reclaimed = 0
     failed: list[str] = []
-    for child in sorted(root.iterdir(), key=lambda item: item.name):
-        try:
-            if child.is_symlink() or not child.is_dir():
-                continue
-            if cutoff is not None and child.stat().st_mtime >= cutoff:
-                continue
-        except OSError as exc:
-            failed.append(f"{child.name}: {exc}")
-            continue
-
+    for child in selection:
         size = _entry_size(child)
         try:
             shutil.rmtree(child)

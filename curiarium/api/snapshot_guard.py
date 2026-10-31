@@ -58,10 +58,37 @@ Audit rows are fail-loud: ``audit.record`` raises and nothing catches it, so an
 audit failure propagates unchanged (a 500) with nothing mutated. A ``None``
 context writes no row at all, mirroring ``snapshots._emit``, so a caller that is
 not on a request path keeps working.
+
+A burst of folder deletes is one gesture but N requests, so a follow-on
+``PRE_DELETE`` that starts within ``config.SNAPSHOT_COALESCE_SECONDS`` of the
+previous predelete snapshot reuses it instead of cutting another one. The window
+is anchored absolutely to that snapshot's creation instant and a reuse never
+extends it, so a chain of deletes cannot keep one snapshot alive past the bound.
+The reuse is allowed only after ``provider.list()`` proves the snapshot still
+exists (an operator can delete it through ``DELETE /snapshots/{name}``) and
+counts the snapshots above it, and only when retention has room to keep it
+through one further create: a policy barely wider than the burst leaves no
+room, and the guard then cuts a fresh snapshot rather than promise a pre-image
+retention could take away. Both reuse and create write the one
+``destructive.snapshot_taken`` row this request owns, and a reuse's row says
+``"reused": true`` and names the snapshot it reused. Reuse is sound for folder
+deletes because a folder delete never unlinks a byte: it renames into ``.trash``
+under the same library root, and the purge that does unlink always takes its own
+fresh, uncoalesced snapshot. Only ``PRE_DELETE`` coalesces -- purge and bulk
+delete do not.
+
+The second new outcome is ``has_work=False``: the operation has nothing to act
+on, so no snapshot is taken, no destructive row is written, and the request's
+own row (``folder.delete``/``trash.purge`` with its zero counts) is the honest
+record. An operation with a real byte to remove is never skipped: the caller
+passes ``has_work=True`` whenever it cannot prove there is nothing to act on.
 """
 
 from __future__ import annotations
 
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import HTTPException
@@ -73,6 +100,20 @@ import storage_capabilities
 from schemas import SnapshotNoticeOut
 
 NAME_PATTERN = "<YYYYmmddTHHMMSSZ>-{reason}-<6 hex>"
+
+# The detail of a notice that has nothing to protect: no byte would be removed.
+NOTHING_TO_ACT_ON = "there is nothing to act on: this operation would remove no bytes"
+
+# Only folder deletes coalesce: they unlink nothing, and the purge that does
+# unlink takes its own fresh, per-request snapshot.
+COALESCING_REASONS: frozenset[snapshots.SnapshotReason] = frozenset({snapshots.SnapshotReason.PRE_DELETE})
+
+# The clock seam, in the `login_throttle` idiom: tests step it to exercise the
+# window without sleeping. `_REUSE` maps a reason to (snapshot name, monotonic
+# instant the snapshot was taken), and one lock guards it.
+_now = time.monotonic
+_REUSE_LOCK = threading.Lock()
+_REUSE: dict[snapshots.SnapshotReason, tuple[str, float]] = {}
 
 # The destructive operations, in the order the taxonomy lists them.
 OPERATIONS: tuple[snapshots.SnapshotReason, ...] = (
@@ -193,12 +234,15 @@ def _write_taken(
     method: str,
     pruned: int,
     ctx: Optional[audit.AuditContext],
+    reused: bool = False,
 ) -> None:
     """One row for a snapshot that exists; the exact name is the detail.
 
     ``pruned`` counts what this create's retention removed. A destructive route
     hands the provider no audit context, so no ``snapshot.prune`` row is written
-    on that path: the count here is what records that a prune happened.
+    on that path: the count here is what records that a prune happened. A reuse
+    created nothing and therefore pruned nothing: ``pruned`` is 0 and
+    ``reused`` is true.
     """
     if ctx is None:
         return
@@ -206,7 +250,14 @@ def _write_taken(
         audit.Event(
             audit.DESTRUCTIVE_SNAPSHOT_TAKEN,
             target,
-            {"reason": reason.value, "policy": policy, "name": name, "method": method, "pruned": pruned},
+            {
+                "reason": reason.value,
+                "policy": policy,
+                "name": name,
+                "method": method,
+                "pruned": pruned,
+                "reused": reused,
+            },
         ),
         ctx=ctx,
     )
@@ -244,21 +295,94 @@ def _refusal(reason: snapshots.SnapshotReason, policy: str, unavailable: str) ->
     )
 
 
+def _remember(reason: snapshots.SnapshotReason, name: str) -> None:
+    """Remember a freshly created snapshot as the anchor for a follow-on delete.
+
+    Only a coalescing reason with a non-zero window is remembered; the instant
+    recorded is ``_now()`` at create time, so a later reuse measures the window
+    from the snapshot rather than from itself.
+    """
+    if reason not in COALESCING_REASONS or config.SNAPSHOT_COALESCE_SECONDS <= 0:
+        return
+    with _REUSE_LOCK:
+        _REUSE[reason] = (name, _now())
+
+
+def _reusable(provider: snapshots.SnapshotProvider, reason: snapshots.SnapshotReason) -> Optional[snapshots.Snapshot]:
+    """The snapshot a follow-on operation may reuse, or ``None`` to create fresh.
+
+    Two proofs are performed, because a remembered name is only a hint:
+    ``provider.list()`` proves the snapshot still exists (an operator can delete
+    it through ``DELETE /snapshots/{name}``) and how many snapshots sit above it,
+    and the retention policy then proves one concurrent create cannot evict it:
+    the snapshot must have room for one newer create inside both ``keep_last_n``
+    and ``hard_cap``, and be younger than ``max_age_days``. The window is
+    measured from the snapshot's own creation instant, never refreshed by a
+    reuse: only ``_remember`` moves ``taken_at``, and only a create calls it.
+
+    Anything that does not hold -- another reason, coalescing switched off, no
+    remembered snapshot, a window that has passed, a snapshot gone from the
+    store, no room above it in the retention bound, a snapshot past
+    ``max_age_days`` -- returns ``None``, and the caller creates one.
+    """
+    if reason not in COALESCING_REASONS:
+        return None
+    window = config.SNAPSHOT_COALESCE_SECONDS
+    if window <= 0:
+        return None
+    with _REUSE_LOCK:
+        remembered = _REUSE.get(reason)
+        if remembered is None:
+            return None
+        name, taken_at = remembered
+        if _now() - taken_at > window:
+            return None
+
+    policy = provider.policy
+    listed = provider.list()
+    position = next((index for index, snapshot in enumerate(listed) if snapshot.name == name), None)
+    if position is None:
+        return None
+    existing = listed[position]
+    # Retention keeps the newest `keep_last_n` and caps at `hard_cap`, so one
+    # concurrent create is survivable only with room above this snapshot in
+    # both bounds. Counting it beats guessing: a policy barely wider than the
+    # burst leaves no room, and no reuse happens.
+    newer = len(listed) - position - 1
+    if newer + 2 > policy.keep_last_n or newer + 2 > policy.hard_cap:
+        return None
+    age = datetime.now(timezone.utc) - existing.created_at
+    if age > timedelta(days=policy.max_age_days):
+        return None
+    return existing
+
+
 def guard(
     reason: snapshots.SnapshotReason,
     target: str,
     *,
     ctx: Optional[audit.AuditContext],
+    has_work: bool = True,
 ) -> SnapshotNoticeOut:
     """Take the pre-operation snapshot, or decide (and record) not to.
 
     Called after the handler's own gates and before the mutation, so every path
     out of here leaves the library untouched. ``target`` is the operation's
     subject (a folder id, ``"trash"``, ``"assets"``) and is what the audit row
-    names.
+    names. ``has_work`` is whether the operation has anything to act on;
+    ``False`` means it would remove no bytes, so there is nothing for a snapshot
+    to protect and none is taken.
     """
     policy = policy_for(reason)
     method, unavailable = _capability()
+
+    if not has_work:
+        # Nothing to act on: no snapshot, and no destructive row, because there
+        # is no destruction to record. The request's own row carries its zero
+        # counts.
+        capability = "unavailable" if unavailable is not None else "available"
+        detail = unavailable if unavailable is not None else NOTHING_TO_ACT_ON
+        return _notice(reason, policy, capability, "proceed_without", detail=detail)
 
     if unavailable is not None:
         _write_missed(reason, policy, target, "unavailable", None, ctx)
@@ -268,6 +392,10 @@ def guard(
 
     try:
         provider = snapshots.provider_for(method=method)
+        reused = _reusable(provider, reason)
+        if reused is not None:
+            _write_taken(reason, policy, target, reused.name, provider.method, 0, ctx, reused=True)
+            return _notice(reason, policy, "available", "snapshot", name=reused.name)
         # No context on purpose: the guard owns this operation's single row.
         created = provider.create(reason, ctx=None)
     except (
@@ -292,5 +420,6 @@ def guard(
         return _notice(reason, policy, capability, "proceed_without", detail=str(error))
 
     name = created.snapshot.name
+    _remember(reason, name)
     _write_taken(reason, policy, target, name, provider.method, created.prune.pruned, ctx)
     return _notice(reason, policy, "available", "snapshot", name=name)
