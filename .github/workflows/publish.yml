@@ -80,8 +80,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          # The plain legs keep the OCI titles they had before the variant
+          # existed; the variant is told apart by its matrix name.
           labels: |
-            org.opencontainers.image.title=curiarium-${{ matrix.image }}
+            org.opencontainers.image.title=curiarium-${{ matrix.name }}
             org.opencontainers.image.description=${{ matrix.description }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           flavor: ${{ matrix.flavor }}
