@@ -109,7 +109,8 @@ export function renderPreviewContent(
   asset: Asset,
   variant: PreviewVariant,
   theme: ResolvedTheme,
-  previewMode: PreviewSettings["mode"] = "automatic"
+  previewMode: PreviewSettings["mode"] = "automatic",
+  onThumbnailSaved?: (asset: Asset) => void
 ) {
   const ext = extOf(asset.filename);
   const assetUrl = fileUrl(asset.url);
@@ -134,7 +135,14 @@ export function renderPreviewContent(
       }
       return (
         <React.Suspense fallback={<PreviewLoading />}>
-          <ModelSnapshot url={assetUrl} ext={ext} assetId={asset.id} theme={theme} mode={previewMode} />
+          <ModelSnapshot
+            url={assetUrl}
+            ext={ext}
+            assetId={asset.id}
+            theme={theme}
+            mode={previewMode}
+            onThumbnailSaved={onThumbnailSaved}
+          />
         </React.Suspense>
       );
     }

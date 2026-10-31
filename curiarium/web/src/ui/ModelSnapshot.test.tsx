@@ -2,8 +2,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
 
+const uploadThumbnailSpy = vi.hoisted(() => vi.fn());
+
+vi.mock("../lib/api", async importOriginal => {
+  const actual = await importOriginal<typeof import("../lib/api")>();
+  return { ...actual, uploadGeneratedThumbnail: uploadThumbnailSpy };
+});
+
+import type { Asset } from "../lib/api";
 import { PREVIEW_MAX_ATTEMPTS, PREVIEW_RETRY_MS, PREVIEW_SETTLE_MS, PreviewQueue } from "../lib/previewQueue";
 import { snapshotCache } from "../lib/snapshotCache";
+import { renderPreviewContent } from "./asset-grid/preview";
 import { ModelSnapshot } from "./ModelViewer";
 
 type SnapshotJobSpy = (
@@ -98,6 +107,7 @@ beforeEach(() => {
   observers.length = 0;
   // The snapshot cache is a module-level singleton shared across tests.
   snapshotCache.clear();
+  uploadThumbnailSpy.mockReset();
   vi.useFakeTimers();
   vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
 });
@@ -348,5 +358,82 @@ describe("ModelSnapshot dropped-card recovery", () => {
     await settleRetries(10);
     expect(enqueueSpy).toHaveBeenCalledTimes(1 + PREVIEW_MAX_ATTEMPTS);
     expect(screen.getByText("Preview unavailable")).toBeTruthy();
+  });
+});
+
+describe("ModelSnapshot thumbnail persistence", () => {
+  const savedAsset = {
+    id: "a1",
+    filename: "x.stl",
+    url: "/assets/x.stl",
+    thumb_url: "/thumb/a1.jpg?v=7",
+    tags: [],
+  } as unknown as Asset;
+
+  /** jsdom will not fetch a `data:` URL, so stand in for the image response. */
+  function stubImageFetch() {
+    vi.stubGlobal("fetch", async () => ({
+      blob: async () => new Blob(["png-bytes"], { type: "image/png" }),
+    }));
+  }
+
+  function renderPersistingSnapshot(onSaved: (asset: Asset) => void) {
+    const jobSpy = vi.fn(async () => "data:image/png;base64,AA==");
+    return render(
+      <ModelSnapshot
+        url="/api/assets/a1/file"
+        ext="stl"
+        assetId="a1"
+        theme="light"
+        job={jobSpy}
+        onThumbnailSaved={onSaved}
+      />,
+    );
+  }
+
+  async function settleSnapshot() {
+    fireIntersections();
+    await settleDwell();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  }
+
+  it("uploads the generated snapshot and hands the persisted asset back", async () => {
+    uploadThumbnailSpy.mockResolvedValue(savedAsset);
+    stubImageFetch();
+    const onSaved = vi.fn();
+
+    renderPersistingSnapshot(onSaved);
+    await settleSnapshot();
+
+    expect(uploadThumbnailSpy).toHaveBeenCalledTimes(1);
+    const [assetId, blob] = uploadThumbnailSpy.mock.calls[0] as [string, Blob];
+    expect(assetId).toBe("a1");
+    expect(blob).toBeInstanceOf(Blob);
+    expect(blob.size).toBeGreaterThan(0);
+    expect(onSaved).toHaveBeenCalledWith(savedAsset);
+  });
+
+  it("keeps the rendered snapshot and evicts the cache when the persist fails", async () => {
+    uploadThumbnailSpy.mockRejectedValue(new Error("offline"));
+    stubImageFetch();
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const onSaved = vi.fn();
+
+    renderPersistingSnapshot(onSaved);
+    await settleSnapshot();
+
+    expect(screen.getByAltText("Preview")).toBeTruthy();
+    expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("could not be persisted"), expect.anything());
+    expect(onSaved).not.toHaveBeenCalled();
+    // A cached preview would skip `load()` on remount, so the failed persist evicts it.
+    expect(snapshotCache.has("asset:a1")).toBe(false);
+  });
+
+  it("renders the served thumbnail once the caller's asset carries thumb_url", () => {
+    render(renderPreviewContent(savedAsset, "card", "light"));
+
+    expect(screen.getByRole("img").getAttribute("src")).toContain("/thumb/a1.jpg?v=7");
   });
 });

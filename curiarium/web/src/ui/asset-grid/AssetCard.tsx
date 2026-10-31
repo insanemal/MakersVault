@@ -405,7 +405,7 @@ const AssetCard = React.memo(function AssetCard({
         title="Double-click to open large preview"
         onClick={e => e.stopPropagation()}
       >
-        {renderPreviewContent(item, "card", theme, previewMode)}
+        {renderPreviewContent(item, "card", theme, previewMode, onAssetChanged)}
       </div>
       {item.missing_since && (
         <div

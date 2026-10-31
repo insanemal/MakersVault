@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+const modelSnapshotProps = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 
 vi.mock("../ModelViewer", () => ({
   default: () => null,
-  ModelSnapshot: () => null,
+  ModelSnapshot: (props: Record<string, unknown>) => {
+    modelSnapshotProps.push(props);
+    return null;
+  },
 }));
 
 const lightBurnProps = vi.hoisted(() => [] as Array<Record<string, unknown>>);
@@ -23,6 +28,7 @@ afterEach(cleanup);
 
 beforeEach(() => {
   lightBurnProps.length = 0;
+  modelSnapshotProps.length = 0;
 });
 
 /** The summary line sits on the outer div; the Clear button is a sibling. */
@@ -131,5 +137,33 @@ describe("renderPreviewContent LightBurn dispatcher", () => {
     expect(lightBurnProps).toHaveLength(1);
     expect(lightBurnProps[0]).toMatchObject({ size: 1234, variant: "modal" });
     expect(lightBurnProps[0].mode).toBeUndefined();
+  });
+});
+
+describe("renderPreviewContent 3D snapshot wiring", () => {
+  const asset = {
+    id: "a1",
+    filename: "x.stl",
+    url: "/api/assets/a1/file",
+    thumb_url: null,
+    tags: [],
+  } as unknown as Asset;
+
+  it("forwards the caller's thumbnail callback to the card snapshot", async () => {
+    const onThumbnailSaved = vi.fn();
+
+    render(renderPreviewContent(asset, "card", "light", "automatic", onThumbnailSaved));
+
+    // React.lazy resolves the mocked snapshot asynchronously.
+    await waitFor(() => expect(modelSnapshotProps).toHaveLength(1));
+    expect(modelSnapshotProps[0].onThumbnailSaved).toBe(onThumbnailSaved);
+  });
+
+  it("never renders a snapshot in the modal variant", async () => {
+    render(renderPreviewContent(asset, "modal", "light", "automatic", vi.fn()));
+
+    // The modal renders the interactive viewer, so it is not on the persist path.
+    await act(async () => {});
+    expect(modelSnapshotProps).toHaveLength(0);
   });
 });

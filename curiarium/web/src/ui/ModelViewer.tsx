@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { uploadGeneratedThumbnail } from "../lib/api";
+import { type Asset, uploadGeneratedThumbnail } from "../lib/api";
 import { PREVIEW_MAX_ATTEMPTS, PREVIEW_RETRY_MS, PREVIEW_SETTLE_MS, previewQueue } from "../lib/previewQueue";
 import type { PreviewQueue, PreviewQueueStats } from "../lib/previewQueue";
 import { ResolvedTheme } from "../lib/settings";
@@ -9,6 +9,7 @@ import { acquireSnapshotRenderer } from "../lib/snapshotRenderer";
 import { buildStepGroup } from "../lib/step/buildStepGroup";
 import { parseStepInWorker, stepSizeNotice } from "../lib/step/parseStepInWorker";
 import { STEP_MAX_BYTES } from "../lib/step/protocol";
+import { useStableCallback } from "../lib/useStableCallback";
 
 type ModelViewerProps = { url: string; ext: string; assetId?: string; theme: ResolvedTheme };
 
@@ -297,7 +298,11 @@ type ModelSnapshotProps = ModelViewerProps & {
   mode?: "automatic" | "on-demand";
   queue?: PreviewQueue;
   job?: SnapshotJob;
+  /** Hands the persisted asset (fresh thumb_url) back to the caller's asset state. */
+  onThumbnailSaved?: (asset: Asset) => void;
 };
+
+function noopThumbnailSaved(_asset: Asset) {}
 
 /** Thrown by snapshot generation when its card is gone; not a real failure. */
 export class PreviewCancelledError extends Error {
@@ -318,7 +323,9 @@ export function ModelSnapshot({
   mode = "automatic",
   queue = previewQueue,
   job = generateModelSnapshot,
+  onThumbnailSaved,
 }: ModelSnapshotProps) {
+  const notifySaved = useStableCallback(onThumbnailSaved ?? noopThumbnailSaved);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [state, setState] = useState<SnapshotState>("idle");
@@ -393,9 +400,14 @@ export function ModelSnapshot({
           try {
             const imageBlob = await fetch(image).then(response => response.blob());
             if (controller.signal.aborted) return;
-            await uploadGeneratedThumbnail(assetId, imageBlob);
+            const updated = await uploadGeneratedThumbnail(assetId, imageBlob);
+            if (controller.signal.aborted) return;
+            // The grid must swap to the persisted thumbnail without a reload.
+            notifySaved(updated);
           } catch (err) {
             console.warn("Generated preview could not be persisted:", err);
+            // The cache write precedes this POST, so a hit would skip the retry.
+            snapshotCache.delete(cacheKey);
           }
         }
       } catch (err) {
@@ -425,7 +437,7 @@ export function ModelSnapshot({
       if (settleTimer !== null) clearTimeout(settleTimer);
       if (retryTimer !== null) clearTimeout(retryTimer);
     };
-  }, [url, ext, assetId, mode, requested, queue, job]);
+  }, [url, ext, assetId, mode, requested, queue, job, notifySaved]);
 
   return (
     <div
