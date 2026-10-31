@@ -1,12 +1,22 @@
 name: Publish
 
-# Builds and publishes the two runtime images to GHCR.
+# Builds and publishes the runtime images to GHCR.
 #
-# Tag scheme:
+# Tag scheme, plain images:
 #   edge            - every push to main (what a self-hosted deployment should pin
 #                     to, or a sha- tag for reproducibility)
 #   sha-<7>         - every commit, immutable handle for a rollback
 #   <semver>        - from a v* git tag (v5.2.0 -> 5.2.0, plus 5.2 and 5)
+#   latest          - on a v* tag (metadata-action's default)
+#
+# The API image has a second variant: the same context built with
+# INSTALL_ZFS=1 (Mf-qirh), which adds the `zfs` userspace a ZFS-backed
+# deployment needs. It takes the same tags with a `-zfs` suffix (edge-zfs,
+# sha-<7>-zfs, 5.2.0-zfs, ...) and deliberately no `latest-zfs`: `latest` keeps
+# meaning the default image. Both variants are pushed by one buildx
+# invocation for amd64 + arm64, so a platform that cannot install the package
+# fails the whole job and publishes no tag at all, rather than a manifest list
+# whose arm64 entry silently lacks the binary.
 #
 # Images are multi-arch (amd64 + arm64) so a homelab box and an Apple/ARM host
 # pull the same tag. Builds are cached per image in the Actions cache, which
@@ -34,11 +44,24 @@ jobs:
       matrix:
         include:
           - name: api
+            image: curiarium-api
             context: curiarium/api
             description: Curiarium API (FastAPI)
+            build-args: ""
+            flavor: latest=auto
+          - name: api-zfs
+            image: curiarium-api
+            context: curiarium/api
+            description: Curiarium API (FastAPI) with the ZFS userspace
+            build-args: |
+              INSTALL_ZFS=1
+            flavor: latest=false,suffix=-zfs
           - name: web
+            image: curiarium-web
             context: curiarium/web
             description: Curiarium web UI (nginx + static bundle)
+            build-args: ""
+            flavor: latest=auto
     steps:
       - uses: actions/checkout@v7
 
@@ -56,11 +79,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/curiarium-${{ matrix.name }}
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           labels: |
-            org.opencontainers.image.title=curiarium-${{ matrix.name }}
+            org.opencontainers.image.title=curiarium-${{ matrix.image }}
             org.opencontainers.image.description=${{ matrix.description }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          flavor: ${{ matrix.flavor }}
           tags: |
             type=raw,value=edge,enable={{is_default_branch}}
             type=sha,prefix=sha-,format=short
@@ -75,6 +99,7 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: ${{ matrix.build-args }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}
@@ -83,7 +108,7 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### curiarium-${{ matrix.name }}"
+            echo "### curiarium-${{ matrix.image }} (${{ matrix.name }})"
             echo ""
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"

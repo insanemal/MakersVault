@@ -756,27 +756,25 @@ Two deployment caveats matter in containers:
 
 ### Getting the `zfs` CLI into the API image
 
-The published images do not carry `zfs`. The API image is `python:3.12-slim` plus
-`gosu`, and the CLI is the one thing the ZFS provider needs that is not already
-there — so a pool can be perfectly configured and still report `unavailable`
-with the reason `zfs could not be run`. Check this before any `zfs allow` line.
+The `zfs` CLI is the one thing the ZFS provider needs that the base image does
+not carry (`python:3.12-slim` plus `gosu`), so a pool can be perfectly configured
+and still report `unavailable` with the reason `zfs could not be run`. Check this
+before any `zfs allow` line.
 
-The userspace lives in Debian's `contrib`, which the base image does not enable,
-so a derived image adds the component and the package:
+Two API images are published. `:edge` stays slim and contains no `zfs`; the
+`-zfs` variant is the same image plus the Debian userspace, built for amd64 and
+arm64, and it is what a ZFS deployment should run:
 
-```dockerfile
-# Dockerfile.zfs — the published API image plus the zfs userspace
-FROM ghcr.io/insanemal/curiarium-api:edge
-RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends zfsutils-linux \
-  && rm -rf /var/lib/apt/lists/*
+```
+API_IMAGE=ghcr.io/insanemal/curiarium-api:edge-zfs
 ```
 
-Do **not** add a `USER` line. The image's entrypoint starts as root, aligns
-`PUID`/`PGID`, makes the mounts writable and then `gosu`s to `appuser`; switching
-user in the Dockerfile would break all four steps. Measured cost of the package:
-240 MB to 283 MB.
+Pin `ghcr.io/insanemal/curiarium-api:sha-<short>-zfs` for reproducibility, the
+way `sha-<short>` pins the plain image. The variant is the same `Dockerfile`
+built with `INSTALL_ZFS=1`, which enables Debian's `contrib` component — where
+`zfsutils-linux` lives — and installs the package: measured cost 240 MB to
+283 MB, with the binary at `/usr/sbin/zfs`. The package is the userspace only,
+so the device below is still required.
 
 `/dev/zfs` is the node the userspace talks to the kernel module through, and a
 container cannot create it, so it is passed in from the host:
@@ -784,9 +782,7 @@ container cannot create it, so it is passed in from the host:
 ```yaml
 services:
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile.zfs
+    image: ghcr.io/insanemal/curiarium-api:edge-zfs
     devices:
       - /dev/zfs:/dev/zfs
 ```
@@ -818,6 +814,40 @@ by `zfs-auto-snapshot`, `sanoid`, a backup job or a cron line are invisible to
 the UI and immune to retention even though they live on the same dataset. This
 module never enumerates the dataset, so it cannot prune a snapshot it did not
 name.
+
+### Other bases, or your own registry
+
+An image built from a different base, or mirrored somewhere else, still needs
+the userspace added by hand. It lives in Debian's `contrib`, which the base
+image does not enable, so a derived image adds the component and the package:
+
+```dockerfile
+# Dockerfile.zfs — any API image plus the zfs userspace
+FROM ghcr.io/insanemal/curiarium-api:edge
+RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends zfsutils-linux \
+  && rm -rf /var/lib/apt/lists/*
+```
+
+Do **not** add a `USER` line. The image's entrypoint starts as root, aligns
+`PUID`/`PGID`, makes the mounts writable and then `gosu`s to `appuser`; switching
+user in the Dockerfile would break all four steps. A base that still uses the
+one-line `/etc/apt/sources.list` layout needs `main` widened to `main contrib`
+there instead; `curiarium/api/Dockerfile` handles both layouts for the
+`INSTALL_ZFS=1` build.
+
+Point the deployment at it with `build:` instead of `image:`:
+
+```yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.zfs
+    devices:
+      - /dev/zfs:/dev/zfs
+```
 
 ### Real-pool verification (MANUAL)
 

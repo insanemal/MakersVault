@@ -1,4 +1,4 @@
-.PHONY: verify verify-fast verify-lint lint-api lint-web verify-version verify-api verify-web verify-bridge verify-compose verify-smoke
+.PHONY: verify verify-fast verify-lint lint-api lint-web verify-version verify-api verify-web verify-bridge verify-compose verify-smoke verify-zfs-image
 
 # Host toolchains. A repo-local .venv wins if present; otherwise PATH.
 VENV ?= $(CURDIR)/.venv
@@ -28,10 +28,12 @@ API_TEST_IMAGE ?= curiarium-api-gate0-test:$(RUN_ID)
 WEB_TEST_IMAGE ?= curiarium-web-gate0-test:$(RUN_ID)
 API_LINT_IMAGE ?= curiarium-api-lint:$(RUN_ID)
 WEB_LINT_IMAGE ?= curiarium-web-lint:$(RUN_ID)
+API_PLAIN_IMAGE ?= curiarium-api-plain:$(RUN_ID)
+API_ZFS_IMAGE ?= curiarium-api-zfs:$(RUN_ID)
 
 # Full gate. Run once per wave (or per ticket when it touches migrations,
 # Dockerfiles, nginx.conf, compose manifests or dependency locks).
-verify: verify-lint verify-api verify-web verify-bridge verify-compose verify-smoke
+verify: verify-lint verify-api verify-web verify-bridge verify-compose verify-smoke verify-zfs-image
 
 # Fast gate (~20s, no image builds, no container smoke). Run per ticket while
 # iterating; the wave still ends on `make verify`.
@@ -83,3 +85,25 @@ verify-compose:
 
 verify-smoke:
 	./curiarium/scripts/container-smoke.sh
+
+# The published API image is slim on purpose, and the -zfs variant (Mf-qirh) is
+# the same Dockerfile built with INSTALL_ZFS=1. Both halves are asserted: a `zfs`
+# in the plain image would ship to every deployment, and a missing one in the
+# variant is the bug the variant exists to prevent. CI has no /dev/zfs, so the
+# check can only prove the userspace: `zfs --version` prints the package version
+# and then exits 1 with "zfs_version_kernel() failed", which is why the version
+# line is matched rather than the exit status.
+verify-zfs-image:
+	status=0; \
+	docker build -t $(API_PLAIN_IMAGE) curiarium/api || status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		docker build --build-arg INSTALL_ZFS=1 -t $(API_ZFS_IMAGE) curiarium/api || status=$$?; \
+	fi; \
+	if [ $$status -eq 0 ]; then \
+		docker run --rm --entrypoint /bin/sh $(API_PLAIN_IMAGE) -c 'if command -v zfs; then echo "the plain API image contains zfs; only the -zfs variant may (Mf-qirh)" >&2; exit 1; fi' || status=$$?; \
+	fi; \
+	if [ $$status -eq 0 ]; then \
+		docker run --rm --entrypoint /bin/sh $(API_ZFS_IMAGE) -c 'command -v zfs || { echo "the -zfs API image has no zfs binary" >&2; exit 1; }; zfs --version 2>&1 | grep -E "^zfs-[0-9]" || { echo "zfs --version printed no userspace version" >&2; exit 1; }' || status=$$?; \
+	fi; \
+	docker image rm $(API_PLAIN_IMAGE) $(API_ZFS_IMAGE) >/dev/null 2>&1 || true; \
+	exit $$status

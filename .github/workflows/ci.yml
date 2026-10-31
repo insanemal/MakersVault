@@ -43,3 +43,5 @@ jobs:
         run: make verify-compose
       - name: Run container smoke test
         run: make verify-smoke
+      - name: Assert the -zfs API image variant
+        run: make verify-zfs-image

@@ -163,6 +163,12 @@ Image tags: `edge` (tip of `main`), `sha-<short>` (pin this for reproducible
 deploys), and semver tags from `v*` git tags. Pin a `sha-` tag if you want an
 upgrade to be a decision rather than a side effect.
 
+Each of those has a `-zfs` twin (`edge-zfs`, `sha-<short>-zfs`, `5.2.0-zfs`, …):
+the same API image with the `zfs` userspace baked in, for a deployment whose
+storage lives on a ZFS pool. The plain tags stay slim — the variant is about
+43 MB larger — and the `-zfs` image still needs `/dev/zfs` passed through, as
+[CONFIGURATION.md](curiarium/docs/architecture/CONFIGURATION.md) describes.
+
 **First login.** Four ways in, in priority order:
 
 1. **First-run setup (recommended)** — set `AUTH_MODE=local`, set `AUTH_PASSWORD=`
