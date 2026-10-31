@@ -39,6 +39,11 @@ Semantics that callers must not loose sight of:
   symlink is never moved. Its rows are still deleted, because the row is the
   user-facing object and a file that cannot be moved must not keep a ghost row
   alive; nothing outside the root is ever unlinked or followed.
+* A carve-out can empty the directory around a managed file, and that directory
+  is pruned after the rows commit. When it really is gone, the single `Folder`
+  row that owns it is retired too, so the sidebar stops listing a folder that no
+  longer exists. That retirement is filesystem-first like everything else here:
+  only an observed `rmdir` success retires the row.
 * Restore is file-level only. Rows were deleted because they describe assets
   that no longer existed at delete time. Hand-moving an entry back and running a
   library rescan re-registers the files as new assets. There is no row-level
@@ -61,7 +66,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import HTTPException
-from sqlmodel import Session, delete, select
+from sqlalchemy import delete, exists
+from sqlalchemy.orm import aliased
+from sqlmodel import Session, select
 
 import audit
 import db
@@ -429,6 +436,119 @@ def _delete_rows(session: Session, assets: List[Asset], subtree: List[Folder]) -
         session.delete(node)
 
 
+# Emptied-directory row retirement -----------------------------------
+
+
+def _prune_emptied_directories(
+    session: Session,
+    empty_after_move: list[Path],
+    *,
+    audit_ctx: Optional[audit.AuditContext],
+) -> None:
+    """Remove the directories a carve-out emptied and retire the row that owned each.
+
+    Only ``rmdir`` is used, never a recursive delete: a directory that still
+    holds untracked bytes is not ours to remove, and it keeps its row. The row
+    is retired in a second transaction, after the delete's own commit and only
+    once the ``rmdir`` is observed to succeed, because this module's rule is
+    filesystem first and rows second - retiring a row on a prediction would lose
+    the folder's name and tags with nothing in the trash holding them. The audit
+    row is attributed to the request actor, and it is the only record: no
+    snapshot precedes a single-asset delete.
+    """
+    removed: list[str] = []
+    for directory in empty_after_move:
+        try:
+            directory.rmdir()
+        except OSError:
+            # Still holds other files: not ours to remove.
+            continue
+        try:
+            # `empty_after_move` holds resolved parents, and so does the root, so
+            # this is a plain strip rather than a containment check.
+            removed.append(directory.relative_to(storage_root()).as_posix())
+        except ValueError:
+            # Outside the root: no folder row can own it.
+            continue
+
+    for relative in removed:
+        # The unique `idx_folder_storage_path_unique` index compares
+        # `storage_path COLLATE NOCASE`, so this strips at most one row, with
+        # the same case-insensitivity the index enforces.
+        candidate = session.exec(select(Folder).where(Folder.storage_path.collate("NOCASE") == relative)).first()
+        if candidate is None:
+            # No row owns this directory: nothing to retire.
+            continue
+        # Captured before the delete: the ORM object expires on commit, and the
+        # failure path below must not read it.
+        folder_id = candidate.id
+        folder_label = candidate.name
+        prefix = f"{relative}/"
+        child = aliased(Folder)
+        reference = aliased(Asset)
+        try:
+            # ONE guarded statement with a rowcount check, so the gap between
+            # commit and this delete cannot let a concurrent scan or upload
+            # attach a child between a check and the delete. Each guard:
+            # - a row with ANY child Folder is never retired: `folder.parent_id`
+            #   has no foreign key and `folder_paths.folder_subtree` treats a
+            #   dangling parent as root scope, so the children would silently
+            #   pop to the sidebar root;
+            # - a row any Asset still references, by `folder_id` or by a
+            #   `storage_path` under this directory, is never retired. The LIKE
+            #   prefix is deliberately unescaped: a `%`/`_` in the directory
+            #   name can only OVER-match, and over-matching only keeps the row,
+            #   which is the safe direction;
+            # - a NULL `storage_path` row can never match the exact equality, so
+            #   zip-imported, legacy migration-004 and row-only-move folders that
+            #   legitimately own no directory keep their rows.
+            retired = session.execute(
+                delete(Folder)
+                .where(
+                    Folder.id == folder_id,
+                    Folder.storage_path.collate("NOCASE") == relative,
+                    ~exists().where(child.parent_id == Folder.id),
+                    ~exists().where(reference.folder_id == Folder.id),
+                    ~exists().where(reference.storage_path.like(f"{prefix}%")),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if retired.rowcount != 1:
+                # A concurrent delete won the race: nothing changed, so there is
+                # nothing to audit.
+                session.rollback()
+                log.debug(
+                    "Skipped retiring folder row %s for the emptied directory %s: "
+                    "a concurrent delete removed it first",
+                    folder_id,
+                    relative,
+                )
+                continue
+            audit.stage(
+                session,
+                audit_ctx,
+                audit.Event(
+                    audit.FOLDER_DELETE,
+                    folder_id,
+                    {"name": folder_label, "folders": 1, "assets": 0, "bytes": 0},
+                ),
+            )
+            session.commit()
+        except Exception:
+            # The assets are already deleted and committed, so raising here would
+            # be a lie, and a leftover row is exactly today's benign behaviour.
+            # A guard that fired is a legitimate survivor, not an anomaly, so it
+            # never reaches this branch: there is nothing to warn about.
+            session.rollback()
+            log.warning(
+                "Could not retire the Folder row for the emptied directory %s (folder %s); "
+                "the delete itself succeeded and the row remains",
+                relative,
+                folder_id,
+                exc_info=True,
+            )
+
+
 # Delete ---------------------------------------------------------
 
 # Errnos that mean "this account may not change that directory", not "the server
@@ -460,12 +580,14 @@ def _permission_detail(subject: str, relative: Optional[str], error: OSError) ->
 def trash_folder(session: Session, folder: Folder, *, audit_ctx: Optional[audit.AuditContext]) -> dict:
     """Move a folder's subtree into the trash, then delete its rows.
 
-    Order is fixed: move bytes, commit rows, only then unlink thumbnails. A
-    failure while moving or committing reverses every move, logs the cause and
-    reports it, so the caller never sees a partial delete and an operator never
-    sees a silent one. Emptied ancestor directories are deliberately left alone:
-    an emptied parent still owns a Folder row, so pruning it would
-    desynchronise database and disk.
+    Order is fixed: move bytes, commit rows, only then unlink thumbnails and
+    rmdir directories the move emptied. A failure while moving or committing
+    reverses every move, logs the cause and reports it, so the caller never sees
+    a partial delete and an operator never sees a silent one. The ancestor
+    directory VACATED by the move is deliberately left alone: it still owns a
+    Folder row, so pruning it would desynchronise database and disk. A
+    carve-out parent directory that this delete itself empties is different: it
+    is pruned, and its row retired, exactly as in a single-asset delete.
 
     A permission failure is a 409, not a 500 (Mf-c2gw): the bytes exist but this
     process may not rename them, and no retry changes that. It is the ordinary
@@ -558,12 +680,7 @@ def trash_folder(session: Session, folder: Folder, *, audit_ctx: Optional[audit.
             (thumb_root / f"{asset_id}.jpg").unlink(missing_ok=True)
         except OSError:
             pass
-    for directory in empty_after_move:
-        try:
-            directory.rmdir()
-        except OSError:
-            # Still holds other files: not ours to remove.
-            pass
+    _prune_emptied_directories(session, empty_after_move, audit_ctx=audit_ctx)
 
     return {
         "trash_path": _relative_to_storage(entry),
@@ -596,13 +713,20 @@ def trash_asset(session: Session, asset: Asset, *, audit_ctx: Optional[audit.Aud
     """Move one asset's bytes into the trash, then delete its row and its files' rows.
 
     Same fixed order as `trash_folder`: move bytes, commit rows, only then
-    unlink the thumbnail and rmdir directories the move emptied. A failure
-    while moving or committing reverses every move, logs the cause and reports
-    it, so the caller never sees a partial delete and an operator never sees a
-    silent one; the empty entry is pruned because a failed delete must leave the
-    filesystem exactly as it found it. A permission failure is a 409 for the
-    same reason as in `trash_folder`, and it covers the same live shape: an
-    asset a scan registered inside a directory somebody else created.
+    unlink the thumbnail, rmdir directories the move emptied, and retire the
+    folder row that owned one of them. A failure while moving or committing
+    reverses every move, logs the cause and reports it, so the caller never sees
+    a partial delete and an operator never sees a silent one; the empty entry is
+    pruned because a failed delete must leave the filesystem exactly as it found
+    it. A permission failure is a 409 for the same reason as in `trash_folder`,
+    and it covers the same live shape: an asset a scan registered inside a
+    directory somebody else created.
+
+    Retiring that row is not free: a folder whose row is retired is re-created as
+    a fresh row with empty tags if a file ever lands at that path again, because
+    the scan creates rows only for directories that register a file. That is the
+    accepted cost of not leaving a folder the sidebar lists but the disk does not
+    have.
 
     A file that is missing, outside the root, or a symlink is not moved, yet
     the row is still deleted: otherwise a row whose bytes are gone could never
@@ -673,12 +797,7 @@ def trash_asset(session: Session, asset: Asset, *, audit_ctx: Optional[audit.Aud
         (thumbs_root() / f"{asset_id}.jpg").unlink(missing_ok=True)
     except OSError:
         pass
-    for directory in empty_after_move:
-        try:
-            directory.rmdir()
-        except OSError:
-            # Still holds other files: not ours to remove.
-            pass
+    _prune_emptied_directories(session, empty_after_move, audit_ctx=audit_ctx)
 
     return {"trash_path": _relative_to_storage(entry), "files": file_count, "bytes": asset_bytes}
 

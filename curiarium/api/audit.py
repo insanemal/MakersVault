@@ -359,8 +359,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("POST", "/import"): (ASSET_CREATE,),
     ("POST", "/import/project"): (ASSET_CREATE,),
     ("POST", "/import/zip"): (ASSET_CREATE,),
-    ("DELETE", "/asset/{asset_id}"): (ASSET_DELETE,),
-    ("POST", "/assets/batch/delete"): (ASSET_DELETE, DESTRUCTIVE_SNAPSHOT_TAKEN, DESTRUCTIVE_SNAPSHOT_MISSED),
+    # An asset delete that empties a folder's directory also retires that
+    # folder's row (Mf-sdnj), so both routes below may write `folder.delete`
+    # alongside their own `asset.delete`.
+    ("DELETE", "/asset/{asset_id}"): (ASSET_DELETE, FOLDER_DELETE),
+    ("POST", "/assets/batch/delete"): (ASSET_DELETE, FOLDER_DELETE, DESTRUCTIVE_SNAPSHOT_TAKEN, DESTRUCTIVE_SNAPSHOT_MISSED),
     ("POST", "/asset/{asset_id}/rename"): (ASSET_RENAME,),
     ("POST", "/asset/{asset_id}/meta"): (ASSET_RENAME,),
     ("POST", "/asset/{asset_id}/folder"): (ASSET_MOVE,),

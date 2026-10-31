@@ -174,7 +174,11 @@ change more than one fact or act on more than one target:
   `trash.purge`. An empty selection takes no snapshot, so that request writes
   `trash.purge` alone.
 * `POST /assets/batch/delete` - one `destructive.snapshot_*` row, then one
-  `asset.delete` per asset.
+  `asset.delete` per asset, plus one `folder.delete` per emptied folder row it
+  retires (see the next bullet).
+* `DELETE /asset/{asset_id}` - one `asset.delete`, plus one `folder.delete` row
+  with detail `{"name", "folders": 1, "assets": 0, "bytes": 0}` when the
+  delete empties the folder's directory and so retires that folder's row.
 * `POST /assets/batch/folder` - one `asset.move` per moved asset.
 * `POST /import/zip` - one `asset.create` per extracted entry.
 * `PATCH /users/{user_id}` - one row per changed field. Changing role and
@@ -196,7 +200,9 @@ deleting a selection of assets in one request - share one seam,
 whether the library volume can snapshot, takes one through S2's provider layer
 when it can, and writes exactly one `destructive.snapshot_taken` or
 `destructive.snapshot_missed` row either way. A single-asset delete takes no
-snapshot: the trash keeps it restorable, so it stays `asset.delete` alone.
+snapshot: the trash keeps it restorable, so it stays `asset.delete` alone,
+except that it may additionally write one `folder.delete` row when it retires the
+row of a folder whose directory it has just emptied.
 
 Two qualifications, both about what one request owes the log. A folder delete
 inside `SNAPSHOT_COALESCE_SECONDS` of the previous predelete snapshot reuses it,

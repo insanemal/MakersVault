@@ -390,6 +390,21 @@ The asset gate compares the file name rather than the model name because
 with a count instead of one name per id: typing N names is absurd, while a count
 still proves the client is deleting exactly the rows it showed the user.
 
+Deleting the last managed file of a folder also removes the directory it left
+empty, and the folder's row is retired with it, so the sidebar stops listing a
+folder that is gone. The row goes only after that removal is observed to have
+succeeded, in a step after the delete is committed, and it is audited as
+`folder.delete` attributed to the caller. No snapshot precedes it: a
+single-asset delete stays snapshot-free, so unlike the trashed asset the retired
+row's name and tags are not restorable. The gate is the directory being
+verifiably gone, which is what makes that acceptable. The same rule applies when
+a folder delete empties a managed file's parent directory outside the deleted
+subtree. A folder row is never retired while it still has child folders, while
+any asset still references it, or when its path does not exactly
+(case-insensitively) match the removed directory - so folders that legitimately
+own no directory (zip imports, legacy rows, rows whose bytes were never
+materialised) keep their rows.
+
 ## Authentication modes
 
 `AUTH_MODE` decides which login paths exist: `auto` (default, and the legacy

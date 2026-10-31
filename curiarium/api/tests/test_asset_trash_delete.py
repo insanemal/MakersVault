@@ -11,6 +11,7 @@ again at teardown.
 """
 
 import errno
+import json
 import logging
 import os
 import re
@@ -31,7 +32,7 @@ import trash_service
 from db import engine
 from main import app
 from migrations import run_migrations
-from models import Asset, AssetFile, Folder
+from models import Asset, AssetFile, AuditEvent, Folder
 
 # --- infrastructure ---------------------------------------------------------
 
@@ -80,10 +81,20 @@ def write_thumb(storage: Path, asset_id: str) -> Path:
     return path
 
 
+def insert_folder_row(name: str, parent_id: Optional[str] = None, storage_path: Optional[str] = None) -> str:
+    folder = Folder(name=name, tags_json="[]", parent_id=parent_id, storage_path=storage_path)
+    with Session(engine) as session:
+        session.add(folder)
+        session.commit()
+        session.refresh(folder)
+        return folder.id
+
+
 def insert_asset_row(
     name: str,
     storage_path: Optional[str],
     *,
+    folder_id: Optional[str] = None,
     filename: str = "model.stl",
     size: int = 10,
     is_reference: int = 0,
@@ -95,6 +106,7 @@ def insert_asset_row(
         mime="model/stl",
         size=size,
         name=name,
+        folder_id=folder_id,
         storage_path=storage_path,
         is_reference=is_reference,
         source_path=source_path,
@@ -128,6 +140,14 @@ def read_asset(asset_id: str) -> Optional[Asset]:
         if asset is not None:
             session.expunge(asset)
     return asset
+
+
+def read_folder(folder_id: str) -> Optional[Folder]:
+    with Session(engine) as session:
+        folder = session.get(Folder, folder_id)
+        if folder is not None:
+            session.expunge(folder)
+    return folder
 
 
 def read_asset_file(file_id: str) -> Optional[AssetFile]:
@@ -415,6 +435,145 @@ def test_symlinked_primary_file_is_not_followed(isolated_storage: Path, tmp_path
     assert not (storage / ".trash").exists()
 
 
+# --- the emptied folder's row -----------------------------------------------
+
+
+def test_deleting_the_last_asset_retires_the_folder_row(
+    isolated_storage: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sidebar must stop listing a folder whose directory the delete removed."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        folder_id = insert_folder_row("Ghost", storage_path="Ghost")
+        write_placeholder_file(storage / "Ghost" / "model.stl", b"model bytes")
+        asset_id = insert_asset_row("Model", "Ghost/model.stl", folder_id=folder_id)
+
+        with caplog.at_level(logging.WARNING, logger=trash_service.log.name):
+            response = client.delete(f"/asset/{asset_id}?confirm_name=model.stl", headers=headers)
+        assert response.status_code == 200, response.text
+        # The row must go through the guarded statement's own WHERE clause; only
+        # the swallowed-failure path ever logs this sentence, so seeing it would
+        # mean the row was retired by an exception rather than by the guard.
+        assert "Could not retire the Folder row" not in caplog.text
+
+        listed = client.get("/folders", headers=headers).json()
+        assert folder_id not in {row["id"] for row in listed}
+
+    assert read_asset(asset_id) is None
+    assert not (storage / "Ghost").exists()
+    assert read_folder(folder_id) is None
+
+    # The retirement is audited as a folder delete attributed to this request.
+    # `audit_events` is append-only by trigger, so this row stays behind: the
+    # table is a log, not fixture state to be cleaned up.
+    with Session(engine) as session:
+        events = list(session.exec(select(AuditEvent).where(AuditEvent.action == audit.FOLDER_DELETE)))
+        matching = [row for row in events if row.target == folder_id]
+    assert len(matching) == 1, [row.target for row in events]
+    assert json.loads(matching[0].detail_json) == {"name": "Ghost", "folders": 1, "assets": 0, "bytes": 0}
+
+
+def test_a_folder_that_still_holds_untracked_bytes_keeps_its_row(
+    isolated_storage: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """rmdir refuses a directory with untracked bytes in it, and the row stays."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        folder_id = insert_folder_row("Ghost", storage_path="Ghost")
+        write_placeholder_file(storage / "Ghost" / "model.stl", b"model bytes")
+        stray = storage / "Ghost" / "notes.txt"
+        write_placeholder_file(stray, b"notes bytes")
+        asset_id = insert_asset_row("Model", "Ghost/model.stl", folder_id=folder_id)
+
+        with caplog.at_level(logging.WARNING, logger=trash_service.log.name):
+            response = client.delete(f"/asset/{asset_id}?confirm_name=model.stl", headers=headers)
+        assert response.status_code == 200, response.text
+        # The guard must fire in the DELETE's own WHERE clause: the directory is
+        # still there, so this test proves the no-row-touched path logs nothing
+        # either, and only the swallowed-failure path ever logs that sentence.
+        assert "Could not retire the Folder row" not in caplog.text
+
+    assert read_asset(asset_id) is None
+    assert stray.read_bytes() == b"notes bytes"
+    assert (storage / "Ghost").is_dir()
+    assert read_folder(folder_id) is not None
+
+
+def test_a_folder_with_a_child_folder_keeps_its_row(
+    isolated_storage: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A retired parent would pop its children to the sidebar root: never retire one."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        folder_id = insert_folder_row("Ghost", storage_path="Ghost")
+        child_id = insert_folder_row("Kid", parent_id=folder_id, storage_path="Ghost/Kid")
+        write_placeholder_file(storage / "Ghost" / "model.stl", b"model bytes")
+        asset_id = insert_asset_row("Model", "Ghost/model.stl", folder_id=folder_id)
+
+        with caplog.at_level(logging.WARNING, logger=trash_service.log.name):
+            response = client.delete(f"/asset/{asset_id}?confirm_name=model.stl", headers=headers)
+        assert response.status_code == 200, response.text
+        # The guard must fire in the DELETE's own WHERE clause, so the row survives
+        # because the statement matched nothing: only the swallowed-failure path
+        # ever logs that sentence, and a swallowed exception would also keep it.
+        assert "Could not retire the Folder row" not in caplog.text
+
+    assert read_asset(asset_id) is None
+    assert read_folder(folder_id) is not None
+    assert read_folder(child_id).parent_id == folder_id
+
+
+def test_a_folder_another_asset_still_references_keeps_its_row(
+    isolated_storage: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A row an Asset still points at describes a live object, not a ghost."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        folder_id = insert_folder_row("Ghost", storage_path="Ghost")
+        write_placeholder_file(storage / "Ghost" / "model.stl", b"model bytes")
+        write_placeholder_file(storage / "elsewhere" / "other.stl", b"other bytes")
+        asset_id = insert_asset_row("Model", "Ghost/model.stl", folder_id=folder_id)
+        other_id = insert_asset_row("Other", "elsewhere/other.stl", folder_id=folder_id)
+
+        with caplog.at_level(logging.WARNING, logger=trash_service.log.name):
+            response = client.delete(f"/asset/{asset_id}?confirm_name=model.stl", headers=headers)
+        assert response.status_code == 200, response.text
+        # The guard must fire in the DELETE's own WHERE clause, so the row survives
+        # because the statement matched nothing: only the swallowed-failure path
+        # ever logs that sentence, and a swallowed exception would also keep it.
+        assert "Could not retire the Folder row" not in caplog.text
+
+    assert read_asset(asset_id) is None
+    assert read_asset(other_id).folder_id == folder_id
+    assert not (storage / "Ghost").exists()
+    assert read_folder(folder_id) is not None
+
+
+def test_a_path_less_folder_row_is_never_retired(isolated_storage: Path) -> None:
+    """Zip imports and legacy rows own no directory, so no directory can retire them."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        folder_id = insert_folder_row("Loose", storage_path=None)
+        write_placeholder_file(storage / "Loose" / "model.stl", b"model bytes")
+        asset_id = insert_asset_row("Model", "Loose/model.stl", folder_id=folder_id)
+
+        response = client.delete(f"/asset/{asset_id}?confirm_name=model.stl", headers=headers)
+        assert response.status_code == 200, response.text
+
+    assert read_asset(asset_id) is None
+    assert not (storage / "Loose").exists()
+    assert read_folder(folder_id) is not None
+
+
 # --- failed commit ----------------------------------------------------------
 
 
@@ -598,6 +757,31 @@ def test_batch_delete_requires_matching_confirm_count(isolated_storage: Path) ->
     assert (storage / first["storage_path"]).read_bytes() == b"solid alpha\n"
     assert (storage / second["storage_path"]).read_bytes() == b"solid beta\n"
     assert not (storage / ".trash").exists()
+
+
+def test_batch_delete_of_the_last_asset_also_retires_the_row(isolated_storage: Path) -> None:
+    """Only the item that empties the directory may retire its folder row."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        folder_id = insert_folder_row("Ghost", storage_path="Ghost")
+        write_placeholder_file(storage / "Ghost" / "model.stl", b"model bytes")
+        write_placeholder_file(storage / "Ghost" / "spare.stl", b"spare bytes")
+        first = insert_asset_row("Model", "Ghost/model.stl", folder_id=folder_id)
+        second = insert_asset_row("Spare", "Ghost/spare.stl", folder_id=folder_id, filename="spare.stl")
+
+        response = client.post("/assets/batch/delete", json={"asset_ids": [first], "confirm_count": 1}, headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["deleted"] == [first]
+        # The directory still holds the second file, so the row has to survive.
+        assert read_folder(folder_id) is not None
+
+        response = client.post("/assets/batch/delete", json={"asset_ids": [second], "confirm_count": 1}, headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["deleted"] == [second]
+
+    assert not (storage / "Ghost").exists()
+    assert read_folder(folder_id) is None
 
 
 # --- restore path -----------------------------------------------------------

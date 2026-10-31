@@ -175,3 +175,22 @@ def test_the_docs_pin_the_matrix_size() -> None:
     assert not missing, f"docs/PERMISSIONS.md's size sentence does not state {missing}: {sentence}"
     wrong = {level: (stated[level], count) for level, count in computed.items() if stated[level] != count}
     assert not wrong, f"docs/PERMISSIONS.md states (documented, actual) per level {wrong}: {sentence}"
+
+
+def test_the_docs_describe_retiring_the_emptied_folders_row() -> None:
+    """Mf-sdnj: an asset delete can retire a folder row, and that row is not restorable.
+
+    The paragraph in "Destructive confirmations" is the only place a reader
+    learns that deleting the last file of a folder also removes the sidebar
+    entry, and that no snapshot protects the retired row's name. Pin the claims,
+    not the prose: the wrap points are free to move.
+    """
+    text = " ".join(PERMISSIONS_PATH.read_text(encoding="utf-8").split())
+
+    for needle in (
+        "the sidebar stops listing a folder that is gone",
+        "the retired row's name and tags are not restorable",
+        "A folder row is never retired while it still has child folders",
+        "case-insensitively",
+    ):
+        assert needle in text

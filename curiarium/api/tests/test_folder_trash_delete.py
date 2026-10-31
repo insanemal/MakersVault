@@ -785,3 +785,54 @@ def test_bundle_sidecars_and_stray_managed_files_follow_the_entry(isolated_stora
     assert total_size > 0
     assert purged == {"purged": 1, "bytes": total_size, "failed": []}
     assert not (storage / ".trash" / entry.name).exists()
+
+
+# --- the carve-out parent's row ---------------------------------------------
+
+
+def test_carve_out_parent_directory_and_its_row_are_both_retired(isolated_storage: Path) -> None:
+    """Parity with a single-asset delete: an emptied carve-out parent goes, row and all."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        shelf_id = insert_folder_row("Shelf", storage_path="Shelf")
+        doomed = created_folder(client, headers, "Doomed")
+        write_placeholder_file(storage / "Shelf" / "model.stl", b"model bytes")
+        asset_id = insert_asset_row("Stray", doomed["id"], "Shelf/model.stl")
+
+        response = client.delete(f"/folder/{doomed['id']}?confirm_name=Doomed", headers=headers)
+        assert response.status_code == 200, response.text
+
+        listed = client.get("/folders", headers=headers).json()
+        assert shelf_id not in {row["id"] for row in listed}
+
+    assert read_asset(asset_id) is None
+    assert not (storage / "Shelf").exists()
+    assert read_folder(shelf_id) is None
+
+
+def test_carve_out_parent_with_a_child_folder_keeps_its_row(
+    isolated_storage: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same retirement, refused because the child would pop to the sidebar root."""
+    storage = isolated_storage
+    with TestClient(app) as client:
+        headers = auth_header(client)
+        shelf_id = insert_folder_row("Shelf", storage_path="Shelf")
+        child_id = insert_folder_row("Kid", parent_id=shelf_id, storage_path="Shelf/Kid")
+        doomed = created_folder(client, headers, "Doomed")
+        write_placeholder_file(storage / "Shelf" / "model.stl", b"model bytes")
+        asset_id = insert_asset_row("Stray", doomed["id"], "Shelf/model.stl")
+
+        with caplog.at_level(logging.WARNING, logger=trash_service.log.name):
+            response = client.delete(f"/folder/{doomed['id']}?confirm_name=Doomed", headers=headers)
+        assert response.status_code == 200, response.text
+        # The guard must fire in the DELETE's own WHERE clause, so the row survives
+        # because the statement matched nothing: only the swallowed-failure path
+        # ever logs that sentence, and a swallowed exception would also keep it.
+        assert "Could not retire the Folder row" not in caplog.text
+
+    assert read_asset(asset_id) is None
+    assert read_folder(shelf_id) is not None
+    assert read_folder(child_id).parent_id == shelf_id
