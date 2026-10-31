@@ -19,6 +19,8 @@ services:
       # local, both, oidc or off. Empty means auto.
       - AUTH_MODE=${AUTH_MODE:-auto}
       - AUTH_ALLOW_INSECURE_DEFAULTS=${AUTH_ALLOW_INSECURE_DEFAULTS:-1}
+      # The first-run setup window (ADR 0009); off by default even here.
+      - AUTH_FIRST_RUN_SETUP=${AUTH_FIRST_RUN_SETUP:-false}
       # Login throttling. Repeated failed logins lock the single admin account
       # out with escalating backoff.
       - LOGIN_THROTTLE_ENABLED=${LOGIN_THROTTLE_ENABLED:-true}

@@ -219,6 +219,12 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     # challenge minted by `/login` for the real token pair, so it is public in
     # the same sense `/login` is. It is throttled on the challenge's subject.
     ("POST", "/mfa/verify"): PUBLIC,
+    # First-run setup (Mf-lyj2). Public because it runs before any account exists,
+    # exactly like `/login`; the window it serves is closed by the first enabled
+    # administrator and is 404 on both routes unless AUTH_FIRST_RUN_SETUP is on,
+    # so a deployment that never opted in does not even advertise the surface.
+    ("GET", "/auth/first-run/setup"): PUBLIC,
+    ("POST", "/auth/first-run/setup"): PUBLIC,
     # read: any authenticated principal, including viewers.
     ("GET", "/me"): READ,
     # A viewer must be able to list and sign out their own devices, so both

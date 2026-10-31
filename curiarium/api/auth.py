@@ -97,6 +97,12 @@ def break_glass_configured() -> bool:
 # Escape hatch for throwaway/dev deployments that intentionally keep the
 # published sample credentials. Never set this on a reachable host.
 AUTH_ALLOW_INSECURE_DEFAULTS = env_bool("AUTH_ALLOW_INSECURE_DEFAULTS", False)
+# Opt-in to the first-run setup window (ADR 0009). Off by default, so a
+# deployment that never sets it serves a 404 on both routes rather than an
+# account-creation surface on a fresh install. Read at request time by
+# `first_run.setup_refusal`, not once at import, so the window's availability is
+# decided by the current value of the flag and the current admin count together.
+AUTH_FIRST_RUN_SETUP = env_bool("AUTH_FIRST_RUN_SETUP", False)
 INSECURE_DEFAULT_PASSWORD = "super-secret"
 INSECURE_DEFAULT_SECRET = "changeme-secret"
 ACCESS_TOKEN_TYPE = "access"

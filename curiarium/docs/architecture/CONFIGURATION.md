@@ -37,6 +37,7 @@ that keeps these forwards and fallbacks honest is
 | `CHOWN_MODE` | `minimal` | API entrypoint; `recursive` opts into a full data-tree ownership repair. |
 | `FILE_STORAGE` | `./storage` in code; `/app/storage` in Compose | Managed primary, thumbnail, and bundle root. |
 | `DB_URL` | `sqlite:///./curiarium.db` in code | SQLAlchemy database URL; Compose uses `/app/data/curiarium.db`. |
+| `AUTH_FIRST_RUN_SETUP` | unset (false) | Opts into the first-run setup window (`GET`/`POST /auth/first-run/setup`), which creates the first administrator from the browser and closes itself with that row. Both routes 404 while it is off. See "First-run administrator setup" below and ADR 0009. |
 | `AUTH_MODE` | `auto` | Which login paths exist: `auto` (legacy: on iff the `AUTH_USERNAME`/`AUTH_PASSWORD` pair is set), `local` (password only, SSO refused), `both`, `oidc` (SSO required, local passwords refused), `off`. Empty means `auto`; an unknown value refuses the boot. |
 | `AUTH_USERNAME` | `admin` | Username of the break-glass admin, accepted only while the users table is empty, so a real user account always disables it. |
 | `AUTH_PASSWORD` | `super-secret` | Single-admin bootstrap secret; the API refuses to start while this published sample value is still active. |
@@ -182,6 +183,58 @@ Cosmos route gate with app auth off, every request is anonymous: every asset rea
 through, so nothing downstream can recover it. Attribution is therefore meaningful
 only in the OIDC configuration this document describes; behind the gate the record
 says when and through which door a file arrived, not who brought it.
+
+### First-run administrator setup
+
+Owned by `curiarium/api/first_run.py` (the window, the policy, the atomic claim) and
+`curiarium/api/routers/first_run.py` (the two routes). Decided in ADR 0009.
+
+Every other way in needs something before the UI is usable: break-glass needs a
+`.env` pair written before the first launch, SSO provably cannot mint the first
+administrator (a claim may never grant `admin`), and `POST /users` needs a session
+that only an administrator can create. This window is the third door, and it is
+opt-in:
+
+* **`AUTH_FIRST_RUN_SETUP=1` opens the possibility, not the window.** The window
+  itself is open exactly while `accounts.count_enabled_admins()` is zero, and the
+  first enabled administrator closes it - flag or no flag. Forgetting to unset the
+  flag after the first setup therefore costs nothing; the boot log says the window
+  is closed and tells you to unset it.
+* **Both routes 404 while the flag is off**, with one frozen detail string, so a
+  deployment that never opted in does not admit the surface exists. With the flag
+  on they answer `409` when the auth mode leaves no local password sign-in
+  (`AUTH_MODE=off`, or `AUTH_MODE=oidc`, which SSO cannot bootstrap either), and
+  `404` again once an administrator exists.
+* **The window leaks while it is open, by construction.** Anyone who can reach the
+  API can create the administrator; there is no credential to present, because the
+  point is that none exists yet. Open it only on a network you trust, finish in the
+  same session, then unset it. The route is throttled on one fixed bucket (never on
+  the submitted username, which would multiply the argon2 budget), so a spray can
+  lock the window - recovery is a restart, and an attacker who could do that could
+  simply claim the administrator instead.
+* **It is one-shot.** The claim takes SQLite's write lock (`BEGIN IMMEDIATE`) before
+  it counts administrators, so two simultaneous setups produce one administrator
+  and one `409` rather than two accounts; the break-glass sessions are revoked in
+  the same transaction, and one audit row (`first_run.setup`) names a sentinel
+  `first-run-setup` actor.
+* **The password is deliberately stricter than `POST /users`**: at least 12
+  characters (NIST SP 800-63B's single-factor floor, still a comfortable
+  passphrase) instead of 8, plus no-username, a common-password blocklist and a
+  confirmation field. All violations are returned together as a structured 422,
+  and the value itself reaches no log line, response body or audit row. A
+  schema-*invalid* POST (a non-string field, or an unknown key) gets FastAPI's own
+  422, which does echo the submitted input - exactly as `/login` does today; the
+  policy 422 above never does. The minimum is 8 for every other password surface
+  - this is the one account nobody can recover, so it gets the stricter rule.
+* **The empty-`AUTH_PASSWORD` recipe.** Set `AUTH_MODE=local` first: with the default
+  `auto`, an empty pair means authentication is off, and both routes answer `409`
+  saying exactly that instead of silently creating an account nobody could use.
+  Then set `AUTH_PASSWORD=` -- **empty, not absent**, because an absent line falls
+  back to the published sample value and the startup guard refuses the boot --
+  generate `AUTH_SECRET` as usual, set `AUTH_FIRST_RUN_SETUP=1`, start the stack and
+  open the UI. Create the administrator, then remove the flag and restart. The
+  environment pair was never the account, so there is nothing to remember and
+  nothing to delete afterwards.
 
 ## OIDC / SSO settings
 

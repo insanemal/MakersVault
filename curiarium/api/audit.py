@@ -44,6 +44,12 @@ log = logging.getLogger(__name__)
 
 ACTOR_DISABLED_USERNAME = "local"
 ACTOR_DISABLED_ROLE = "auth-disabled"
+# The first-run setup actor (Mf-lyj2): nobody authenticated to create that account,
+# so the row must not claim a user did it. The username is a sentinel, the role says
+# plainly that this was unauthenticated, and `actor_user_id` stays NULL.
+ACTOR_FIRST_RUN = "first-run-setup"
+ACTOR_FIRST_RUN_KIND = "first-run"
+ACTOR_FIRST_RUN_ROLE = "unauthenticated"
 
 ASSET_CREATE = "asset.create"
 ASSET_DELETE = "asset.delete"
@@ -111,6 +117,9 @@ MFA_STEP_UP = "mfa.step_up"
 MFA_DISABLE = "mfa.disable"
 MFA_RECOVERY_CODES_REGENERATE = "mfa.recovery_codes.regenerate"
 SETTINGS_MFA_REQUIRE_ADMIN_UPDATE = "settings.mfa_require_admin.update"
+# The first-run setup window (Mf-lyj2). One row for the administrator row it created
+# plus the break-glass sessions it killed; never a password or a hash.
+FIRST_RUN_SETUP = "first_run.setup"
 
 ACTIONS: frozenset[str] = frozenset({
     ASSET_CREATE,
@@ -161,6 +170,7 @@ ACTIONS: frozenset[str] = frozenset({
     MFA_DISABLE,
     MFA_RECOVERY_CODES_REGENERATE,
     SETTINGS_MFA_REQUIRE_ADMIN_UPDATE,
+    FIRST_RUN_SETUP,
 })
 
 
@@ -330,6 +340,10 @@ def list_events(
 # permission matrix without guessing.
 ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("POST", "/login"): (LOGIN_SUCCEEDED,),
+    # First-run setup is a login *and* an account creation, and the one row says
+    # both: the actor is the sentinel `first-run-setup`, the target is the chosen
+    # username, and the detail names the user id it made.
+    ("POST", "/auth/first-run/setup"): (FIRST_RUN_SETUP,),
     # The one mutating OIDC route. `GET /auth/oidc/callback` also writes
     # `login.oidc.failed`, but it is a GET and records through `audit.record`
     # with its own transaction, so it has no entry here by design.

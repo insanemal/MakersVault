@@ -78,6 +78,10 @@ EDITOR_PASSWORD = "editor-password-1"
 VIEWER_USERNAME = "viewer"
 VIEWER_PASSWORD = "viewer-password-1"
 BREAK_GLASS = {"username": "admin", "password": "super-secret"}
+# The first-run sweep's credentials: long enough for the first-run policy (12), no
+# username in it, and not on the blocklist.
+FIRST_RUN_USERNAME = "first-admin"
+FIRST_RUN_PASSWORD = "correct horse battery staple"
 
 STL_BYTES = b"solid cube\nendsolid cube\n"
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -688,6 +692,24 @@ def call_mfa_recovery_codes(client, headers, ids, monkeypatch) -> Response:
     )
 
 
+def call_first_run_setup(client, headers, ids, monkeypatch) -> Response:
+    """The one audited route that runs before any account exists.
+
+    It needs an empty users table, so the admin this module seeded is dropped
+    first (the fixtures are function-scoped, so nothing else notices). The flag is
+    off suite-wide, so it is patched on for this request only, and the fixed
+    throttle bucket is cleared so a previous test's 422 cannot turn this into a 429.
+    """
+    truncate_accounts()
+    login_throttle_module.first_run_limiter.reset()
+    monkeypatch.setattr(auth, "AUTH_FIRST_RUN_SETUP", True)
+    return client.post(
+        "/auth/first-run/setup",
+        json={"username": FIRST_RUN_USERNAME, "password": FIRST_RUN_PASSWORD, "confirm_password": FIRST_RUN_PASSWORD},
+        headers=headers,
+    )
+
+
 def call_mfa_policy(client, headers, ids, monkeypatch) -> Response:
     # Written back to the shipped value: an explicit policy assertion is audited
     # even when nothing changed, and this sweep must not change the policy.
@@ -696,6 +718,7 @@ def call_mfa_policy(client, headers, ids, monkeypatch) -> Response:
 
 CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/login"): call_login,
+    ("POST", "/auth/first-run/setup"): call_first_run_setup,
     ("POST", "/refresh"): call_refresh,
     ("POST", "/auth/oidc/exchange"): call_oidc_exchange,
     ("DELETE", "/me/sessions/{session_id}"): call_delete_own_session,
@@ -753,6 +776,9 @@ ACTOR_SELF_ROUTES = {
     ("POST", "/auth/oidc/exchange"): sessions.OIDC_KIND,
     ("POST", "/mfa/verify"): sessions.PASSWORD_KIND,
     ("POST", "/mfa/step-up"): sessions.PASSWORD_KIND,
+    # First-run setup creates the account it signs in, so its row names no user at
+    # all: the actor is the sentinel `first-run-setup` (Mf-lyj2).
+    ("POST", "/auth/first-run/setup"): audit.ACTOR_FIRST_RUN_KIND,
 }
 # The rest of the MFA self-service surface is driven by a throwaway account rather
 # than the fixture admin (see the call specs), so the sweep asserts that account by

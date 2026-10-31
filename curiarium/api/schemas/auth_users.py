@@ -2,9 +2,12 @@
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
+  "FirstRunSetupRequest",
+  "FirstRunSetupResponse",
+  "FirstRunStatusResponse",
   "LoginRequest",
   "LoginResponse",
   "MeOut",
@@ -12,6 +15,7 @@ __all__ = [
   "OidcStatusOut",
   "PasswordResetRequest",
   "RefreshRequest",
+  "RuleDoc",
   "SessionOut",
   "UserCreate",
   "UserOut",
@@ -40,6 +44,57 @@ class LoginResponse(BaseModel):
   token_type: str = "bearer"
   mfa_required: bool = False
   mfa_token: Optional[str] = None
+
+
+class RuleDoc(BaseModel):
+  """One password rule, id plus the message the server would use in a 422.
+
+  Public so the setup form can mirror the server's copy instead of inventing its
+  own wording, and so a wording change on either side shows up as two strings that
+  drift apart in a test rather than as a confusing error in front of an operator.
+  """
+
+  rule: str
+  message: str
+
+
+class FirstRunStatusResponse(BaseModel):
+  """Whether the window is open, and the policy the form has to satisfy.
+
+  `available` is always true here: the route 404s when the window is shut, so a
+  200 *is* "open". It is in the body anyway because the client branches on a
+  field, not on a status code it has to remember to check.
+  """
+
+  available: bool
+  min_password_length: int
+  rules: list[RuleDoc]
+
+
+class FirstRunSetupRequest(BaseModel):
+  """The first administrator's credentials, typed once on a fresh install.
+
+  Both password fields are `Field(repr=False)` so a stray `repr(body)` in a log
+  line, a debugger or a traceback cannot print them. That governs reprs only:
+  pydantic's own validation errors do echo the submitted input, exactly as
+  `/login` does today (CONFIGURATION.md says so).
+  """
+
+  model_config = ConfigDict(extra="forbid")
+  username: str
+  password: str = Field(repr=False)
+  confirm_password: str = Field(repr=False)
+
+
+class FirstRunSetupResponse(LoginResponse):
+  """A completed setup: the token pair `/login` would return, plus a notice.
+
+  Signing the operator in rather than bouncing them to the login form is the
+  decision ADR 0009 records: the window and the break-glass sessions both died in
+  the transaction that made this response possible.
+  """
+
+  notice: str
 
 
 class RefreshRequest(BaseModel):

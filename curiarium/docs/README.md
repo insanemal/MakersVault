@@ -30,6 +30,7 @@ What is authoritative, what is historical, and what to read when.
 | [0006](adr/0006-oidc-sso-flow-and-role-policy.md) | OIDC flow and the rule that claims can never mint an admin |
 | [0007](adr/0007-session-lifecycle-and-refresh-replay.md) | Session lifecycle, refresh grace window, replay as compromise |
 | [0008](adr/0008-mfa-totp-enrolment.md) | TOTP enrolment, recovery codes, the admin MFA policy |
+| [0009](adr/0009-first-run-administrator-setup.md) | First-run administrator setup from the browser: an opt-in window that closes itself at the first enabled admin |
 
 ## Historical — kept for provenance, describes an earlier project
 

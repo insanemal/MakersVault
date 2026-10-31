@@ -237,7 +237,7 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 91 routes: 9 public, 33 read,
+Paths are FastAPI templates exactly as declared. 93 routes: 11 public, 33 read,
 19 contribute, 13 write, 17 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
@@ -257,6 +257,8 @@ vs `/folder/{folder_id}`. Match on the template, not on the noun.
 | GET    | `/auth/oidc/callback` | IdP redirect target; parks a single-use handoff code (503 when auth is disabled) |
 | POST   | `/auth/oidc/exchange` | the only mutation: provisions/links, opens a session, writes the audit row (503 when auth is disabled) |
 | POST   | `/mfa/verify` | trades the five-minute challenge `/login` minted for the real token pair; it runs before a session exists, so it cannot carry a bearer token (503 when auth is disabled) |
+| GET    | `/auth/first-run/setup` | reports whether the first-run setup window is open and the password policy it enforces; 404 unless `AUTH_FIRST_RUN_SETUP` is on and no enabled administrator exists |
+| POST   | `/auth/first-run/setup` | creates the first administrator and signs them in; the window closes with that row, and both routes answer the same 404 when it is shut |
 
 ### read (any authenticated role, viewers included)
 

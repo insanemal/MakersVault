@@ -5,6 +5,7 @@ stays here is the FastAPI app, the lifespan boot checks, the CORS/request-id
 middleware and the compatibility re-exports described below.
 """
 
+import logging
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -12,10 +13,13 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI
+from sqlmodel import Session
 from starlette.middleware.cors import CORSMiddleware
 
 import asset_service
 import audit
+import auth
+import first_run
 import import_runs
 import login_throttle as login_throttle_module
 import oidc
@@ -58,6 +62,7 @@ from routers import (
     trash,
     uploads,
 )
+from routers import first_run as first_run_routes
 from routers import (
     oidc as oidc_routes,
 )
@@ -66,6 +71,8 @@ from routers.uploads import delete_asset_row_only
 from url_utils import normalize_import_url
 from version import __version__
 from zip_service import arcname_for_asset
+
+log = logging.getLogger(__name__)
 
 # The routers this app serves, in include order. One list drives both the
 # startup guard and the `include_router` calls below, so a router cannot be
@@ -76,6 +83,9 @@ API_ROUTERS = (
     snapshots.router,
     library.router,
     auth_users.router,
+    # Immediately after the login surface it extends: first-run setup is the same
+    # pre-session job one step earlier, and the order is what the guards read back.
+    first_run_routes.router,
     mfa.router,
     audit_log.router,
     uploads.router,
@@ -110,7 +120,15 @@ async def lifespan(_app: FastAPI):
     audit.assert_audit_coverage()
     login_throttle_module.limiter.reset()
     login_throttle_module.mfa_limiter.reset()
+    login_throttle_module.first_run_limiter.reset()
     run_migrations(engine)
+    # After the migrations, because the answer needs the users table. One line, and
+    # only when the flag is on: an operator who opened the window has to be able to
+    # read back whether it is still open, and an operator who did not is not told
+    # about a surface that 404s.
+    if auth.AUTH_FIRST_RUN_SETUP:
+        with Session(engine) as session:
+            log.info(first_run.startup_notice(session))
     # A row left `running` belongs to a previous process that died before it
     # could finish. This runs before the mount thread, so it cannot catch ours.
     import_runs.mark_interrupted()

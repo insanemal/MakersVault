@@ -75,6 +75,10 @@ REQUIRED_KEYS: set[str] = {
     "AUTH_ACCESS_TOKEN_TTL",
     "AUTH_REFRESH_TTL_SECONDS",
     "AUTH_ALLOW_INSECURE_DEFAULTS",
+    # First-run setup (Mf-lyj2). Read by auth.py, forwarded by both manifests with
+    # its code default (false) as the fallback, documented in .env.example and in
+    # the CONFIGURATION.md table.
+    "AUTH_FIRST_RUN_SETUP",
     "AUTH_TOKEN_TTL",
     "MAX_UPLOAD_MB",
     "IMPORT_MAX_MB",
@@ -104,6 +108,12 @@ NEW_KEYS: set[str] = {
     "AUTH_ACCESS_TOKEN_TTL",
     "AUTH_REFRESH_TTL_SECONDS",
     "AUTH_ALLOW_INSECURE_DEFAULTS",
+    # First-run setup (Mf-lyj2). Listed here as well as in REQUIRED_KEYS on
+    # purpose: REQUIRED_KEYS only proves the derivation still finds it, while
+    # NEW_KEYS is what makes the fallback-equality, .env.example and
+    # CONFIGURATION.md row checks run at all - a `:-flase` typo in the manifest
+    # would otherwise pass green.
+    "AUTH_FIRST_RUN_SETUP",
     "MAX_UPLOAD_MB",
     "IMPORT_MAX_MB",
     "IMPORT_ZIP_MAX_MB",

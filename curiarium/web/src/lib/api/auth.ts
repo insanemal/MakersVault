@@ -92,6 +92,145 @@ export async function logout(refresh: string): Promise<void> {
 
 export type OidcStatus = { enabled: boolean };
 
+/** One password-policy rule returned by the first-run setup status and errors. */
+export type FirstRunRule = { rule: string; message: string };
+
+/** Policy guidance for the one-time first-administrator setup window. */
+export type FirstRunStatus = {
+  available: true;
+  min_password_length: number;
+  rules: FirstRunRule[];
+};
+
+function isFirstRunRule(value: unknown): value is FirstRunRule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "rule" in value &&
+    typeof value.rule === "string" &&
+    "message" in value &&
+    typeof value.message === "string"
+  );
+}
+
+function parsePolicyDetail(detail: unknown): { message: string; rules: FirstRunRule[] } {
+  let message = "Password does not meet the first-run setup policy.";
+  let rules: FirstRunRule[] = [];
+
+  if (typeof detail === "object" && detail !== null) {
+    if ("message" in detail && typeof detail.message === "string") {
+      message = detail.message;
+    }
+    if ("rules" in detail && Array.isArray(detail.rules)) {
+      rules = detail.rules.filter(isFirstRunRule);
+    }
+  }
+
+  return { message, rules };
+}
+
+/** The setup response has the usual sign-in tokens and operator instructions. */
+export type FirstRunSetupResult = AuthTokens & { notice: string };
+
+/**
+ * Read the first-run window without making the sign-in page dependent on it.
+ * A 404, unsupported response, malformed successful JSON or network failure
+ * means there is no setup window; 409 stays distinct because its mode-specific
+ * explanation is useful while the ordinary login form remains available.
+ */
+export async function getFirstRunStatus(): Promise<FirstRunStatus | null | { reason: string }> {
+  try {
+    const res = await fetch(`${apiBase()}/auth/first-run/setup`, { cache: "no-store" });
+    if (res.status === 409) {
+      try {
+        const data: unknown = await res.json();
+        if (
+          typeof data === "object" &&
+          data !== null &&
+          "detail" in data &&
+          typeof data.detail === "string"
+        ) {
+          return { reason: data.detail };
+        }
+      } catch {
+        // Keep the mode refusal visible even when a proxy sends malformed JSON.
+      }
+      return { reason: "First-run setup is unavailable for this authentication mode." };
+    }
+    if (!res.ok) return null;
+    const data: unknown = await res.json();
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "available" in data &&
+      data.available === true &&
+      "min_password_length" in data &&
+      typeof data.min_password_length === "number" &&
+      "rules" in data &&
+      Array.isArray(data.rules) &&
+      data.rules.every(isFirstRunRule)
+    ) {
+      return data as FirstRunStatus;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** A rejected first-run request carries its HTTP status and any named policy failures. */
+export class FirstRunSetupError extends Error {
+  readonly status: number;
+  readonly rules: FirstRunRule[];
+
+  constructor(message: string, rules: FirstRunRule[], status = 422) {
+    super(message);
+    this.name = "FirstRunSetupError";
+    this.status = status;
+    this.rules = rules;
+  }
+}
+
+/** A message for a failure whose body carried no usable `detail` (a proxy page). */
+function fallbackSetupMessage(status: number): string {
+  if (status === 404) return "First-run setup is not available on this deployment.";
+  if (status === 409) return "An administrator already exists; first-run setup is closed.";
+  if (status === 429) return "Too many setup attempts. Please try again later.";
+  return "First-run setup failed";
+}
+
+/** Create the one-time administrator and receive the matching login session. */
+export async function firstRunSetup(
+  username: string,
+  password: string,
+  confirm: string,
+): Promise<FirstRunSetupResult> {
+  const res = await fetch(`${apiBase()}/auth/first-run/setup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, confirm_password: confirm }),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let data: { detail?: unknown } | null = null;
+    try {
+      data = await res.json();
+    } catch {
+      // Non-JSON proxy errors still need a safe, useful fallback.
+    }
+    if (res.status === 422) {
+      const { message, rules } = parsePolicyDetail(data?.detail);
+      throw new FirstRunSetupError(message, rules, res.status);
+    }
+    const message =
+      typeof data?.detail === "string" && data.detail.trim()
+        ? data.detail
+        : fallbackSetupMessage(res.status);
+    throw new FirstRunSetupError(message, [], res.status);
+  }
+  return res.json();
+}
+
 /**
  * Whether this deployment offers SSO at all. A deployment that was never given
  * an IdP answers 503 (and an old proxy might answer 404), and a network blip is

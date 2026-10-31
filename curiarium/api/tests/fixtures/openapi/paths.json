@@ -1409,6 +1409,62 @@
       "summary": "List Audit Events"
     }
   },
+  "/auth/first-run/setup": {
+    "get": {
+      "description": "Report whether the window is open and what the password must satisfy.\n\nA GET because it is a pre-flight the login screen makes on every load, and it\nwrites nothing. `no-store` because the answer changes the moment the first\nadministrator exists, and a cached \"available: true\" would leave the form on\nscreen against a window that is already shut.",
+      "operationId": "first_run_status_auth_first_run_setup_get",
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FirstRunStatusResponse"
+              }
+            }
+          },
+          "description": "Successful Response"
+        }
+      },
+      "summary": "First Run Status"
+    },
+    "post": {
+      "description": "Create the first administrator and sign them in, in one transaction.\n\n201 rather than 200: a `users` row came into existence, and the response\ncarries the same token pair `POST /login` returns so the client lands signed\nin. That is deliberate - the window shut the instant this row existed, and the\nbreak-glass sessions died in the same commit, so bouncing the operator back to\na login form to retype a password they chose ten seconds ago would prove\nnothing and risk a lockout on a typo.\n\n429 (throttled) and 422 (policy) both record a failure against the one fixed\nbucket; the 404/409 window refusals never touch it, so a closed window cannot\nbe used to lock a live one.",
+      "operationId": "first_run_setup_auth_first_run_setup_post",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/FirstRunSetupRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "201": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FirstRunSetupResponse"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "summary": "First Run Setup"
+    }
+  },
   "/auth/oidc/callback": {
     "get": {
       "description": "Verify the provider's answer and park a single-use handoff code.\n\nThis route writes no user, session or identity row. A rejected attempt is the\nonly thing it records, through `audit.record`.",

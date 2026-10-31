@@ -11,6 +11,7 @@ vi.mock("../lib/api", async () => {
   const oidc = await import("../lib/api/auth");
   return {
     getOidcStatus: vi.fn(async () => ({ enabled: false })),
+    getFirstRunStatus: vi.fn(async () => null),
     login: vi.fn(),
     mfaVerify: vi.fn(),
     isMfaChallenge: oidc.isMfaChallenge,
@@ -20,8 +21,9 @@ vi.mock("../lib/api", async () => {
 });
 
 import Login from "./Login";
-import { getOidcStatus, login, mfaVerify } from "../lib/api";
+import { getFirstRunStatus, getOidcStatus, login, mfaVerify } from "../lib/api";
 
+const getFirstRunStatusMock = vi.mocked(getFirstRunStatus);
 const getOidcStatusMock = vi.mocked(getOidcStatus);
 const loginMock = vi.mocked(login);
 const mfaVerifyMock = vi.mocked(mfaVerify);
@@ -100,6 +102,8 @@ beforeEach(() => {
   installMemoryStorage();
   getOidcStatusMock.mockReset();
   getOidcStatusMock.mockResolvedValue({ enabled: false });
+  getFirstRunStatusMock.mockReset();
+  getFirstRunStatusMock.mockResolvedValue(null);
   loginMock.mockReset();
   assignMock.mockReset();
   vi.stubGlobal("location", {

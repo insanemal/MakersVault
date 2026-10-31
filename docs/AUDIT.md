@@ -67,7 +67,7 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 48 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 49 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
@@ -96,6 +96,7 @@ could honestly reconstruct.
 | `user.password_reset` | `POST /users/{user_id}/password` | username | `{"user_id", "sessions_revoked", "reset_disabled", "granted_local_login"}` - per the target's state before the write; never the password or a hash | fail-closed |
 | `library.scan.start` | `POST /library/scan` | `"library"` | none | fail-loud |
 | `login.succeeded` | `POST /login` | the real username | `{"kind", "client_ip"}` | fail-closed |
+| `first_run.setup` | `POST /auth/first-run/setup` | the username the setup chose | `{"user_id", "username", "role", "source", "break_glass_sessions_revoked", "flag"}` | fail-closed |
 | `login.oidc.succeeded` | `POST /auth/oidc/exchange` | the real username | `{"kind", "client_ip", "issuer"}` | fail-closed |
 | `login.oidc.failed` | no route: written by `GET /auth/oidc/callback` through `audit.record` when the IdP response is rejected | the issuer | `{"kind", "client_ip", "issuer", "sso_error"}` | fail-loud |
 | `snapshot.create` | `POST /snapshots` (the route hands the provider an audit context, so the provider writes the row) | snapshot name | `{"reason", "method", "pruned"}` | fail-loud |
@@ -194,8 +195,8 @@ snapshot: the trash keeps it restorable, so it stays `asset.delete` alone.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 91 routes, 36
-of them `GET`; the remaining 55 split into 41 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 93 routes, 37
+of them `GET`; the remaining 56 split into 42 audited keys and 14 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -435,13 +436,19 @@ and no SQL statement issued through this application can rewrite the log".
 ## Who is recorded
 
 `audit.context_for(request, context)` derives the actor from the request and
-never raises. Three modes:
+never raises. Four modes:
 
 | Mode | `actor` | `actor_user_id` | `actor_role` | `actor_kind` |
 |---|---|---|---|---|
 | password login | the real `User.username` from the live session row (`auth.AuthContext`) | the user id | the role in force for this request (`sessions.role_for`) | `password` |
 | break-glass env admin | the `AUTH_USERNAME` value | `NULL` | `admin` | `break-glass` |
+| first-run setup | `first-run-setup` (`audit.ACTOR_FIRST_RUN`) | `NULL` | `unauthenticated` | `first-run` |
 | authentication disabled | `local` (`audit.ACTOR_DISABLED_USERNAME`) | `NULL` | `auth-disabled` | `auth-disabled` |
+
+The first-run row is the one that must not claim a user: nobody authenticated to
+create that account, so the actor is a sentinel and the chosen username is the
+`target` instead, which makes `GET /audit?target=<username>` find the row that
+created the account.
 
 `actor` and `actor_role` are denormalised copies taken at write time, for the
 same reason `sessions.username` is: the row is a historical record and must still
@@ -501,7 +508,7 @@ administration).
 | Parameter | Type | Semantics |
 |---|---|---|
 | `actor` | string | exact match, case-insensitive (both sides lowered, value stripped) |
-| `action` | string | exact match, case-sensitive - one of the 48 names above |
+| `action` | string | exact match, case-sensitive - one of the 49 names above |
 | `target` | string | case-sensitive substring match; `%`, `_` and `\` are escaped, so it is a literal substring. An asset id also returns that asset's `asset.create` row, because creation's target is the new id |
 | `since` | string | `created_at >= value` |
 | `until` | string | `created_at <= value` |

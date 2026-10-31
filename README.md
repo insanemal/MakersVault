@@ -111,6 +111,10 @@ Four kinds of value end up in that file, and only one kind is generated here:
 | `OIDC_CLIENT_SECRET` | **issued by your identity provider** — paste it, do not make one up |
 | `MAKERWORLD_COOKIE`, `THINGIVERSE_COOKIE` | **pasted from the site**, optional; they only raise public rate limits |
 
+`AUTH_PASSWORD` can also be left **empty**: it is the break-glass bootstrap pair, and the
+first-run setup screen (below) exists so that no environment credential has to be invented
+before the first launch. If you do set it, choose it and delete it once a real admin exists.
+
 Generate the signing secret once. Re-running this is safe: it never rotates a secret
 that is already there, because appending a second `AUTH_SECRET` silently invalidates
 every session and refresh token.
@@ -159,15 +163,28 @@ Image tags: `edge` (tip of `main`), `sha-<short>` (pin this for reproducible
 deploys), and semver tags from `v*` git tags. Pin a `sha-` tag if you want an
 upgrade to be a decision rather than a side effect.
 
-**First login.** Three ways in, in priority order:
+**First login.** Four ways in, in priority order:
 
-1. **Local users** — create them in Settings → Users, which is also where an admin
+1. **First-run setup (recommended)** — set `AUTH_MODE=local`, set `AUTH_PASSWORD=`
+   **empty** (an absent line falls back to the published sample and the API refuses to
+   boot; and with the default `AUTH_MODE=auto` an empty pair means auth is off, so the
+   window refuses with that reason), then set `AUTH_FIRST_RUN_SETUP=1`, start the stack and
+   open the UI. The setup screen creates the first administrator and signs you in; remove
+   the flag and restart afterwards. The window
+   closes itself with the first **enabled administrator**, so a forgotten flag is not a
+   hole — but while it is open *anyone who can reach the API* can create that administrator,
+   so do it on a trusted network and finish in the same session. This is ADR
+   [0009](curiarium/docs/adr/0009-first-run-administrator-setup.md).
+2. **Local users** — create them in Settings → Users, which is also where an admin
    changes a role, disables an account or resets a password (that account's other
    sessions are signed out). Scripted deployments can use `POST /users` instead.
-2. **OIDC** — set `OIDC_ENABLED` and friends; see [CONFIGURATION.md](curiarium/docs/architecture/CONFIGURATION.md).
-3. **Break-glass** — `AUTH_USERNAME` / `AUTH_PASSWORD` from the environment work **only while
-   both are genuinely set and the users table is empty**. Create a user and they stop working;
-   that is deliberate.
+3. **OIDC** — set `OIDC_ENABLED` and friends; see [CONFIGURATION.md](curiarium/docs/architecture/CONFIGURATION.md).
+   SSO can never mint the first administrator, so this is not a bootstrap path.
+4. **Break-glass** — `AUTH_USERNAME` / `AUTH_PASSWORD` from the environment work **only while
+   both are genuinely set and the users table is empty**. Create the first account *of any
+   role* and they stop working; that is deliberate. Note the two thresholds are different:
+   break-glass dies with the first account of any role, while the first-run window closes
+   with the first *enabled administrator*.
 
 The API refuses to start with the published sample credentials (`super-secret` /
 `changeme-secret`) unless you explicitly set `AUTH_ALLOW_INSECURE_DEFAULTS=1`.

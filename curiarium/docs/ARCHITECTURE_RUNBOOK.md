@@ -457,7 +457,11 @@ bounded; a default production launch cannot unknowingly use published secrets;
 bridge abuse tests demonstrate the narrowed trust boundary.
 
 **Owner checkpoint:** choose the first-run administrator experience and supported
-remote-access posture.
+remote-access posture. The first-run half is **decided**: ADR 0009 adds an opt-in
+setup window (`AUTH_FIRST_RUN_SETUP`, both routes public and `404` unless it is on)
+that creates the first administrator from the browser and closes itself at the
+first enabled admin; break-glass stays as the environment-driven fallback. The
+remote-access posture is still open here.
 
 **Rollback:** configuration changes use a compatibility window for existing
 deployments. A documented environment migration restores service without reverting
@@ -1002,7 +1006,7 @@ The initial required ADR queue is:
 
 1. Canonical development and production deployment manifests.
 2. SQLite schema versioning and migration mechanism.
-3. Secure first-run single-admin configuration.
+3. Secure first-run single-admin configuration. Decided in ADR 0009 and implemented in ticket `Mf-lyj2`: `AUTH_FIRST_RUN_SETUP` (default off) opens `GET`/`POST /auth/first-run/setup`; the window is open only while no enabled administrator exists and closes itself with that row, the claim takes SQLite's write lock before counting so two simultaneous setups yield one admin, and the first-run password policy is the stricter 12-character one. Break-glass remains the environment-driven fallback, and its threshold is still the empty users table.
 4. File-scoped browser-to-bridge handoff grants. Decided in ADR 0004 and implemented in ticket `M3-7bb7`: `POST /file-grants` mints 60-second, single-path, read-only `?sig=` grants that replace the session JWT in file URLs and in the `curiarium-slicer://` handoff, and the log leak is closed (query-free nginx format, request-time error logging disabled with `error_log /dev/null` because nginx has no error-log format, `--no-access-log` on uvicorn, and live plus dead-upstream smoke canaries). `Mf-c80i` closed the error-log half, which `M3-7bb7`'s access-log fix left open. ADR 0005 supersedes 0004 for the implemented design; 0004's import-cookie and `localStorage` decisions still stand.
 5. Preview budgets and persisted preview state.
 6. Content identity and duplicate-suggestion semantics.

@@ -168,3 +168,10 @@ limiter = LoginThrottle()
 # `limiter` would let a spray of wrong TOTP codes lock the password login out
 # (and vice versa), which is a denial-of-service lever, not a defence.
 mfa_limiter = LoginThrottle()
+# A third table for the first-run setup window (Mf-lyj2). Its own instance for the
+# same reason: a `/login` spray must not lock the one-time bootstrap, and the
+# first-run bucket must not lock a real login attempt. The bucket key is one fixed
+# string (`first_run.FIRST_RUN_THROTTLE_KEY`), never the submitted username: the
+# username space is attacker-controlled and unauthenticated there, so a
+# per-username bucket would multiply the argon2 budget by `MAX_BUCKETS`.
+first_run_limiter = LoginThrottle()

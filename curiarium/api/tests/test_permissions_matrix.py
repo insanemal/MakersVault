@@ -1,7 +1,7 @@
 """Per-route permission sweeps driven by `permissions.ROUTE_PERMISSIONS`.
 
 Why this file exists: Mf-2nbc enforces a level with a *per-route dependency*, and
-the only thing that keeps 91 hand-written declarations honest is a test that
+the only thing that keeps 93 hand-written declarations honest is a test that
 visits every route at every role. The sweeps below are parametrised from
 `permissions.ROUTE_PERMISSIONS`, so that table is both the documentation and the
 test plan: add a route without classifying it and
@@ -506,6 +506,25 @@ def call_logout(client: TestClient, headers: dict[str, str], ids: Ids, monkeypat
 
 def call_me(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     return client.get("/me", headers=headers)
+
+
+def call_first_run_status(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # The window is opt-in and conftest pins the flag off, so the sweeps see the
+    # same 404 a deployment that never set it would get - including the admin
+    # sweep, which is seeded with an administrator anyway.
+    return client.get("/auth/first-run/setup", headers=headers)
+
+
+def call_first_run_setup(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # A schema-valid body is mandatory: FastAPI validates before the handler, so a
+    # bodyless spec would answer 422 and fail the pin without ever reaching the
+    # window check. The values satisfy the first-run policy so the only thing that
+    # can refuse them is the closed window.
+    return client.post(
+        "/auth/first-run/setup",
+        json={"username": "first-admin", "password": "correct horse battery staple", "confirm_password": "correct horse battery staple"},
+        headers=headers,
+    )
 
 
 def call_scan_status(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
@@ -1043,6 +1062,8 @@ def call_mfa_policy(client: TestClient, headers: dict[str, str], ids: Ids, monke
 CALLS: dict[tuple[str, str], CallSpec] = {
     ("GET", "/health"): call_health,
     ("POST", "/login"): call_login,
+    ("GET", "/auth/first-run/setup"): call_first_run_status,
+    ("POST", "/auth/first-run/setup"): call_first_run_setup,
     ("POST", "/refresh"): call_refresh,
     ("POST", "/logout"): call_logout,
     ("GET", "/auth/oidc/status"): call_oidc_status,
@@ -1146,6 +1167,11 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("GET", "/auth/oidc/callback"): 503,
     ("POST", "/auth/oidc/exchange"): 503,
     ("POST", "/login"): 200,
+    # First-run setup (Mf-lyj2): 404 on both routes, because the flag is off in the
+    # suite (conftest) and the sweeps seed an administrator anyway. A deployment
+    # that never opted in must not advertise the surface, which is what this pins.
+    ("GET", "/auth/first-run/setup"): 404,
+    ("POST", "/auth/first-run/setup"): 404,
     ("POST", "/refresh"): 200,
     ("POST", "/logout"): 204,
     ("GET", "/me"): 200,
@@ -1360,7 +1386,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 91 routes - 9 public / 33 read / 19 contribute / 13 write / 17 admin.
+    """The matrix is pinned at 93 routes - 11 public / 33 read / 19 contribute / 13 write / 17 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1370,9 +1396,9 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 91, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 93, counts
     assert counts == {
-        permissions.PUBLIC: 9,
+        permissions.PUBLIC: 11,
         permissions.READ: 33,
         permissions.CONTRIBUTE: 19,
         permissions.WRITE: 13,
