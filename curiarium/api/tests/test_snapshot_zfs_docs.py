@@ -77,3 +77,32 @@ def test_the_docs_state_the_mountpoint_precondition() -> None:
     text = configuration_text()
 
     assert "must be the dataset mountpoint" in text
+
+
+def test_the_docs_say_how_the_zfs_cli_gets_into_the_container() -> None:
+    """The published image ships no `zfs`, so the install step has to be written down.
+
+    Verified against the real image: `python:3.12-slim` plus `gosu`, and
+    `command -v zfs` finds nothing. An operator who follows only the dataset and
+    `zfs allow` procedure therefore still gets `unavailable` / "zfs could not be
+    run", which reads like a misconfigured pool rather than a missing package.
+    """
+    text = configuration_text()
+
+    assert "zfsutils-linux" in text, "the docs no longer say which package provides the CLI"
+    assert "FROM ghcr.io/insanemal/curiarium-api" in text, "the derived-image example is gone"
+    assert "/dev/zfs:/dev/zfs" in text, "the device passthrough line is gone"
+
+
+def test_the_derived_image_example_does_not_switch_user() -> None:
+    """The entrypoint needs root: it aligns PUID/PGID, chowns, then gosu's to appuser.
+
+    A `USER` line in a derived image would break all four steps, so the example
+    must not carry one - it is the obvious thing to add when a `RUN apt-get` fails.
+    """
+    text = configuration_text()
+    start = text.index("```dockerfile")
+    block = text[start : text.index("```", start + 3)]
+
+    assert "apt-get install" in block
+    assert "USER" not in block, "the derived-image example must not switch user; the entrypoint gosu's"

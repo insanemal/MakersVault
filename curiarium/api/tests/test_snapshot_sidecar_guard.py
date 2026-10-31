@@ -417,17 +417,36 @@ def configuration_doc() -> str:
     return CONFIGURATION_DOC.read_text(encoding="utf-8")
 
 
-def fenced_yaml_block(text: str) -> str:
-    """The one fenced ``yaml`` block, so prose mentioning ``ports:`` cannot confuse a check."""
+def fenced_yaml_blocks(text: str) -> list[str]:
+    """Every fenced ``yaml`` block, so prose mentioning ``ports:`` cannot confuse a check."""
     lines = text.splitlines()
     starts = [index for index, line in enumerate(lines) if line.strip() == "```yaml"]
-    assert len(starts) == 1, f"expected exactly one ```yaml fence, found {len(starts)}"
-    body: list[str] = []
-    for line in lines[starts[0] + 1 :]:
-        if line.strip() == "```":
-            return "\n".join(body)
-        body.append(line)
-    raise AssertionError("the ```yaml fence is never closed")
+    blocks: list[str] = []
+    for start in starts:
+        body: list[str] = []
+        for line in lines[start + 1 :]:
+            if line.strip() == "```":
+                blocks.append("\n".join(body))
+                break
+            body.append(line)
+        else:
+            raise AssertionError("a ```yaml fence is never closed")
+    return blocks
+
+
+def fenced_yaml_block(text: str) -> str:
+    """The compose example, selected by content rather than by being the only one.
+
+    This used to require exactly one ``yaml`` fence in the whole document, which
+    made any second, unrelated compose snippet in CONFIGURATION.md a failing test
+    rather than a documentation change (the ZFS section needed one: the derived
+    image and its ``/dev/zfs`` device). Selecting by the sidecar service keeps the
+    original property - prose cannot smuggle ``ports:`` into the checked block -
+    while letting the document grow.
+    """
+    blocks = [block for block in fenced_yaml_blocks(text) if "snapshot-sidecar" in block]
+    assert len(blocks) == 1, f"expected exactly one yaml block naming snapshot-sidecar, found {len(blocks)}"
+    return blocks[0]
 
 
 def section_body(text: str, heading: str) -> str:

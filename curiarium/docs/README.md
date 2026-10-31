@@ -57,6 +57,7 @@ of the current system, and their counts, schemas and roadmap are stale.
 | [../docs/brand/](file://../docs/brand/) | Brand sources: the AI reference, the originally supplied SVG, generated SVGs, and `build.py` which regenerates every asset |
 | [../curiarium/api/tests/fixtures/prepared/](file://../curiarium/api/tests/fixtures/prepared/) | Fixtures for the prepared-print parser tests |
 | [../curiarium/slicer-bridge/README.md](../curiarium/slicer-bridge/README.md) | Bridge installation and protocol |
+| [../curiarium/snapshot-sidecar/README.md](../curiarium/snapshot-sidecar/README.md) | The opt-in BTRFS snapshot helper: when you need it, and the invariant that makes it work |
 
 ## Keeping this honest
 

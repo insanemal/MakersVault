@@ -701,6 +701,58 @@ Two deployment caveats matter in containers:
   reading `<root>/.zfs/snapshot/...` by name works either way; only an
   operator's `ls` of the mount point shows the difference.
 
+### Getting the `zfs` CLI into the API image
+
+The published images do not carry `zfs`. The API image is `python:3.12-slim` plus
+`gosu`, and the CLI is the one thing the ZFS provider needs that is not already
+there — so a pool can be perfectly configured and still report `unavailable`
+with the reason `zfs could not be run`. Check this before any `zfs allow` line.
+
+The userspace lives in Debian's `contrib`, which the base image does not enable,
+so a derived image adds the component and the package:
+
+```dockerfile
+# Dockerfile.zfs — the published API image plus the zfs userspace
+FROM ghcr.io/insanemal/curiarium-api:edge
+RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends zfsutils-linux \
+  && rm -rf /var/lib/apt/lists/*
+```
+
+Do **not** add a `USER` line. The image's entrypoint starts as root, aligns
+`PUID`/`PGID`, makes the mounts writable and then `gosu`s to `appuser`; switching
+user in the Dockerfile would break all four steps. Measured cost of the package:
+240 MB to 283 MB.
+
+`/dev/zfs` is the node the userspace talks to the kernel module through, and a
+container cannot create it, so it is passed in from the host:
+
+```yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.zfs
+    devices:
+      - /dev/zfs:/dev/zfs
+```
+
+Verify both, in this order — the CLI first, because a missing binary and a
+missing device node are indistinguishable from the capability report alone:
+
+```
+docker compose exec api zfs --version
+# zfs-2.3.x-1 (userspace). A `zfs_version_kernel() failed` line means /dev/zfs is
+# not in this container: the CLI is fine, the device passthrough is not.
+```
+
+Then follow the real-pool procedure below. A platform that offers only
+environment, volumes and ports — a UI-driven deployment with no device
+passthrough — cannot run this provider in that container: use the CephFS
+provider instead, or take snapshots outside the application and treat them as
+history it will not list or prune.
+
 Browsing is read-only: `<root>/.zfs/snapshot/<name>` is the kernel's view of one
 snapshot, and it is never written to. A restore copies out of that view into the
 live tree; this module never runs `zfs rollback`, because a rollback rewinds the
@@ -788,8 +840,10 @@ the dot-directory `.snap` inside the mount, so the library scan keeps ignoring i
 exactly as it ignores CephFS's `.snap` store.
 
 The helper is a separate build (`curiarium/snapshot-sidecar`) carrying only
-`btrfs-progs` and the two stdlib modules `guard.py` and `server.py`. A clearly
-marked example override, opt-in and not part of any shipped manifest:
+`btrfs-progs` and the two stdlib modules `guard.py` and `server.py`; it has its
+own [README](../snapshot-sidecar/README.md) for the short version and the
+security posture. A clearly marked example override, opt-in and not part of any
+shipped manifest:
 
 ```yaml
 # docker-compose.override.yml -- opt-in BTRFS snapshot sidecar (example)
