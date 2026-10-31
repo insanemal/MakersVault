@@ -15,6 +15,7 @@ vi.mock("../../lib/api", () => {
     listUsers: vi.fn(),
     createUser: vi.fn(),
     updateUser: vi.fn(),
+    deleteUser: vi.fn(),
     resetUserPassword: vi.fn(),
     // `SessionsSection` is imported for its label helpers, so its own calls
     // must exist on the mocked module too.
@@ -29,6 +30,7 @@ import UsersSection, { formatCreatedAt } from "./UsersSection";
 import {
   UnauthorizedError,
   createUser,
+  deleteUser,
   listUserSessions,
   listUsers,
   resetUserPassword,
@@ -41,6 +43,7 @@ import {
 const listUsersMock = vi.mocked(listUsers);
 const createUserMock = vi.mocked(createUser);
 const updateUserMock = vi.mocked(updateUser);
+const deleteUserMock = vi.mocked(deleteUser);
 const resetUserPasswordMock = vi.mocked(resetUserPassword);
 const listUserSessionsMock = vi.mocked(listUserSessions);
 const revokeUserSessionMock = vi.mocked(revokeUserSession);
@@ -110,6 +113,10 @@ beforeEach(() => {
   updateUserMock.mockImplementation(async (id, patch) => {
     directory = directory.map(user => (user.id === id ? { ...user, ...patch } : user));
     return directory.find(user => user.id === id)!;
+  });
+  deleteUserMock.mockReset();
+  deleteUserMock.mockImplementation(async userId => {
+    directory = directory.filter(user => user.id !== userId);
   });
   resetUserPasswordMock.mockReset();
   resetUserPasswordMock.mockResolvedValue(undefined);
@@ -300,6 +307,55 @@ describe("UsersSection", () => {
 
     await waitFor(() => expect(revokeUserSessionMock).toHaveBeenCalledWith("sess-1"));
     await waitFor(() => expect(listUserSessionsMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("asks before retiring an account and calls nothing until confirmed", async () => {
+    render(<UsersSection onBack={() => {}} />);
+
+    // bill is the second account in the directory.
+    fireEvent.click((await screen.findAllByRole("button", { name: "Retire" }))[1]);
+
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(screen.getByText("Retire bill?")).toBeTruthy();
+    expect(deleteUserMock).not.toHaveBeenCalled();
+  });
+
+  it("retires the confirmed account and drops it from the directory", async () => {
+    render(<UsersSection onBack={() => {}} />);
+
+    fireEvent.click((await screen.findAllByRole("button", { name: "Retire" }))[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "Retire account" }));
+
+    await waitFor(() => expect(deleteUserMock).toHaveBeenCalledWith("u-bill"));
+    await waitFor(() => expect(screen.queryByText("Retire bill?")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("bill")).toBeNull());
+    expect(await screen.findByText("The account was retired.")).toBeTruthy();
+  });
+
+  it("retires nothing when the confirmation is cancelled", async () => {
+    render(<UsersSection onBack={() => {}} />);
+
+    fireEvent.click((await screen.findAllByRole("button", { name: "Retire" }))[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByText("Retire bill?")).toBeNull());
+    expect(deleteUserMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the server's last-admin sentence when a retirement is refused", async () => {
+    deleteUserMock.mockRejectedValueOnce(
+      new Error("at least one enabled administrator is required"),
+    );
+    render(<UsersSection onBack={() => {}} />);
+
+    fireEvent.click((await screen.findAllByRole("button", { name: "Retire" }))[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "Retire account" }));
+
+    expect(
+      await screen.findByText("at least one enabled administrator is required"),
+    ).toBeTruthy();
+    // Refused by the server, so the account is still listed.
+    expect(screen.getByText("bill")).toBeTruthy();
   });
 
   it("hands an UnauthorizedError from the list to the caller", async () => {

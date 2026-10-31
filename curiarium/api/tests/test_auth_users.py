@@ -10,7 +10,7 @@ import time
 import jwt
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, delete
+from sqlmodel import Session, delete, select
 
 import auth
 import config
@@ -19,7 +19,7 @@ import main
 import sessions
 from db import engine
 from migrations import run_migrations
-from models import User, UserSession
+from models import AuditEvent, MfaRecoveryCode, OidcIdentity, Project, User, UserSession
 
 ADMIN_USERNAME = "root"
 ADMIN_PASSWORD = "root-password-1"
@@ -28,6 +28,10 @@ VIEWER_PASSWORD = "viewer-password-1"
 
 def truncate_accounts() -> None:
     with Session(engine) as db:
+        # Children first, like the API's own delete path: the foreign keys are
+        # enforced, so a recovery-code row would otherwise keep its account alive.
+        db.execute(delete(MfaRecoveryCode))
+        db.execute(delete(OidcIdentity))
         db.execute(delete(UserSession))
         db.execute(delete(User))
         db.commit()
@@ -311,6 +315,7 @@ def test_user_administration_requires_admin(client: TestClient) -> None:
         client.post("/users", json={"username": "bob", "password": VIEWER_PASSWORD}, headers=bearer(alice["token"])),
         client.get("/users", headers=bearer(alice["token"])),
         client.patch(f"/users/{created['id']}", json={"disabled": True}, headers=bearer(alice["token"])),
+        client.delete(f"/users/{created['id']}", headers=bearer(alice["token"])),
     ):
         assert response.status_code == 403
 
@@ -318,6 +323,7 @@ def test_user_administration_requires_admin(client: TestClient) -> None:
         client.post("/users", json={"username": "bob", "password": VIEWER_PASSWORD}),
         client.get("/users"),
         client.patch(f"/users/{created['id']}", json={"disabled": True}),
+        client.delete(f"/users/{created['id']}"),
     ):
         assert response.status_code == 401
 
@@ -468,3 +474,159 @@ def test_rotation_keeps_the_absolute_refresh_expiry(client: TestClient) -> None:
     assert after.created_at == before.created_at
     assert after.last_used_at >= before.last_used_at
     assert after.access_expires_at > int(time.time())
+
+
+# --- retiring an account (Mf-rnrn) -----------------------------------------
+
+LAST_ADMIN_DETAIL = "at least one enabled administrator is required"
+
+
+def delete_user(client: TestClient, admin_token: str, user_id: str):
+    return client.delete(f"/users/{user_id}", headers=bearer(admin_token))
+
+
+def test_admin_retires_an_account_and_it_can_no_longer_sign_in(client: TestClient) -> None:
+    tokens = bootstrap_admin(client)
+    created = create_user(client, tokens["token"], "alice", VIEWER_PASSWORD)
+    alice = login_user(client, "alice", VIEWER_PASSWORD)
+
+    retired = delete_user(client, tokens["token"], created["id"])
+
+    assert retired.status_code == 204, retired.text
+    assert retired.content == b""
+    remaining = [user["username"] for user in client.get("/users", headers=bearer(tokens["token"])).json()]
+    assert "alice" not in remaining
+    # The account is gone, not disabled: its live session dies with it and the
+    # credentials no longer authenticate.
+    assert client.get("/assets", headers=bearer(alice["token"])).status_code == 401
+    assert client.post("/login", json={"username": "alice", "password": VIEWER_PASSWORD}).status_code == 401
+
+
+def test_retiring_an_account_deletes_its_sessions_and_identity_children(client: TestClient) -> None:
+    """Every child row with a plain NO ACTION foreign key goes before the account."""
+    tokens = bootstrap_admin(client)
+    created = create_user(client, tokens["token"], "alice", VIEWER_PASSWORD)
+    login_user(client, "alice", VIEWER_PASSWORD)
+    with Session(engine) as db:
+        db.add(MfaRecoveryCode(user_id=created["id"], code_hmac="not-a-real-hmac", created_at="2024-01-01T00:00:00+00:00"))
+        db.add(
+            OidcIdentity(
+                issuer="https://idp.example.com",
+                subject="sub-1",
+                user_id=created["id"],
+                created_at="2024-01-01T00:00:00+00:00",
+            )
+        )
+        # `project.owner_id` is ON DELETE SET NULL, so the project survives.
+        db.commit()
+        project = Project(name="Owned by alice", owner_id=created["id"], created_at="2024-01-01T00:00:00+00:00", updated_at="2024-01-01T00:00:00+00:00")
+        db.add(project)
+        db.commit()
+        project_id = project.id
+
+    assert delete_user(client, tokens["token"], created["id"]).status_code == 204
+
+    with Session(engine) as db:
+        assert db.exec(select(UserSession).where(UserSession.user_id == created["id"])).first() is None
+        assert db.exec(select(MfaRecoveryCode).where(MfaRecoveryCode.user_id == created["id"])).first() is None
+        assert db.exec(select(OidcIdentity).where(OidcIdentity.user_id == created["id"])).first() is None
+        orphan = db.get(Project, project_id)
+        assert orphan is not None
+        assert orphan.owner_id is None
+        db.delete(orphan)
+        db.commit()
+
+
+def test_the_last_admin_cannot_retire_itself(client: TestClient) -> None:
+    tokens = bootstrap_admin(client)
+    me = client.get("/me", headers=bearer(tokens["token"])).json()
+
+    refused = delete_user(client, tokens["token"], me["id"])
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == LAST_ADMIN_DETAIL
+    # Refused, not half-applied: the caller is still an administrator.
+    assert client.get("/users", headers=bearer(tokens["token"])).status_code == 200
+
+
+def test_a_disabled_second_admin_does_not_let_the_last_admin_retire_itself(client: TestClient) -> None:
+    tokens = bootstrap_admin(client)
+    me = client.get("/me", headers=bearer(tokens["token"])).json()
+    second = create_user(client, tokens["token"], "second", VIEWER_PASSWORD, role="admin")
+    disabled = client.patch(f"/users/{second['id']}", json={"disabled": True}, headers=bearer(tokens["token"]))
+    assert disabled.status_code == 200, disabled.text
+
+    refused = delete_user(client, tokens["token"], me["id"])
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == LAST_ADMIN_DETAIL
+
+
+def test_a_second_enabled_admin_lets_the_last_admin_retire_itself(client: TestClient) -> None:
+    tokens = bootstrap_admin(client)
+    me = client.get("/me", headers=bearer(tokens["token"])).json()
+    create_user(client, tokens["token"], "second", VIEWER_PASSWORD, role="admin")
+
+    assert delete_user(client, tokens["token"], me["id"]).status_code == 204
+    assert client.get("/users", headers=bearer(tokens["token"])).status_code == 401
+
+
+def test_retiring_an_unknown_account_is_a_404(client: TestClient) -> None:
+    tokens = bootstrap_admin(client)
+
+    response = delete_user(client, tokens["token"], "00000000-0000-0000-0000-000000000000")
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "no such user"
+
+
+def test_a_retired_accounts_audit_rows_keep_their_actor_snapshot(client: TestClient) -> None:
+    """The rows the account wrote must read exactly as they did before the delete."""
+    tokens = bootstrap_admin(client)
+    created = create_user(client, tokens["token"], "alice", VIEWER_PASSWORD)
+    login_user(client, "alice", VIEWER_PASSWORD)
+    second = login_user(client, "alice", VIEWER_PASSWORD)
+    # An audited action taken BY the account that is about to be retired: revoke
+    # one of its own devices, which writes `session.revoke` under alice.
+    own_devices = client.get("/me/sessions", headers=bearer(second["token"])).json()
+    other = [row["id"] for row in own_devices if not row["current"]]
+    assert other, "the second login should have left a non-current device"
+    revoked = client.delete(f"/me/sessions/{other[0]}", headers=bearer(second["token"]))
+    assert revoked.status_code == 204, revoked.text
+
+    def audit_snapshot(user_id: str) -> list[dict[str, str]]:
+        """Every audit row this account wrote, exactly as stored.
+
+        The log is append-only across the whole session, so other tests' rows are
+        in the table too: the comparison is scoped to the account's own id, which
+        is what the delete must leave alone.
+        """
+        with Session(engine) as db:
+            rows = db.exec(select(AuditEvent).where(AuditEvent.actor_user_id == user_id)).all()
+        return [
+            {
+                "id": row.id,
+                "actor": row.actor,
+                "actor_user_id": row.actor_user_id or "",
+                "actor_role": row.actor_role,
+                "action": row.action,
+                "target": row.target,
+                "detail_json": row.detail_json or "",
+            }
+            for row in rows
+        ]
+
+    before = audit_snapshot(created["id"])
+    assert before, "the fixture's own audited action wrote no row"
+    assert {row["actor"] for row in before} == {"alice"}
+    assert {row["actor_role"] for row in before} == {"viewer"}
+    assert "session.revoke" in {row["action"] for row in before}
+
+    assert delete_user(client, tokens["token"], created["id"]).status_code == 204
+
+    assert audit_snapshot(created["id"]) == before
+    # The retired account's own row is visible to the audit reader, attributed.
+    listed = client.get("/audit", params={"action": "session.revoke"}, headers=bearer(tokens["token"])).json()
+    row = next(event for event in listed["events"] if event["actor_user_id"] == created["id"])
+    assert row["actor"] == "alice"
+    assert row["actor_role"] == "viewer"

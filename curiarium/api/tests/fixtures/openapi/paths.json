@@ -4336,6 +4336,42 @@
     }
   },
   "/users/{user_id}": {
+    "delete": {
+      "description": "Retire an account for good (Mf-rnrn).\n\n204 and never a body: the account is gone, so there is nothing to describe\nand no serialiser a credential could leak through. A 409 here is the shared\nlast-admin refusal - an administrator cannot retire the deployment's last\nenabled administrator, because the break-glass env admin stops working once\nthe users table is non-empty. The audit row is staged in the same\ntransaction as the delete, and the rows the retired account already wrote\nkeep their `actor` username snapshot.",
+      "operationId": "delete_user_users__user_id__delete",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "user_id",
+          "required": true,
+          "schema": {
+            "title": "User Id",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "204": {
+          "description": "Successful Response"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HTTPValidationError"
+              }
+            }
+          },
+          "description": "Validation Error"
+        }
+      },
+      "security": [
+        {
+          "HTTPBearer": []
+        }
+      ],
+      "summary": "Delete User"
+    },
     "patch": {
       "operationId": "update_user_users__user_id__patch",
       "parameters": [

@@ -344,6 +344,10 @@ ROUTE_PERMISSIONS: dict[tuple[str, str], str] = {
     ("POST", "/users"): ADMIN,
     ("GET", "/users"): ADMIN,
     ("PATCH", "/users/{user_id}"): ADMIN,
+    # Retiring an account is irreversible: it takes the account's sessions, SSO
+    # binding and recovery codes with it, so it is administration like the rest
+    # of the users block. The audit rows it already wrote keep their snapshot.
+    ("DELETE", "/users/{user_id}"): ADMIN,
     # A password reset is administration like the rest of the users block.
     ("POST", "/users/{user_id}/password"): ADMIN,
     # Session administration over another principal: listing somebody else's

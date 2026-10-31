@@ -548,6 +548,12 @@ def call_update_user(client, headers, ids, monkeypatch) -> Response:
     return client.patch(f"/users/{ids.viewer_id}", json={"disabled": True}, headers=headers)
 
 
+def call_delete_user(client, headers, ids, monkeypatch) -> Response:
+    # Each audited spec runs on its own function-scoped fixture, so retiring the
+    # viewer here cannot strand a later spec's credentials.
+    return client.delete(f"/users/{ids.viewer_id}", headers=headers)
+
+
 def call_reset_password(client, headers, ids, monkeypatch) -> Response:
     # A5: the same password the fixture signed the viewer in with, so no later
     # spec finds a stale credential or a revoked session.
@@ -746,6 +752,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/settings/mount-import"): call_mount_import_settings,
     ("POST", "/users"): call_create_user,
     ("PATCH", "/users/{user_id}"): call_update_user,
+    ("DELETE", "/users/{user_id}"): call_delete_user,
     ("POST", "/users/{user_id}/password"): call_reset_password,
     ("POST", "/library/scan"): call_start_scan,
     ("POST", "/snapshots"): call_create_snapshot,

@@ -2,6 +2,7 @@ import React from "react";
 import {
   UnauthorizedError,
   createUser,
+  deleteUser,
   listUsers,
   resetUserPassword,
   updateUser,
@@ -23,6 +24,8 @@ export type UsersState = {
   setRole: (userId: string, role: Role) => Promise<boolean>;
   setDisabled: (userId: string, disabled: boolean) => Promise<boolean>;
   resetPassword: (userId: string, body: PasswordReset) => Promise<boolean>;
+  /** Irreversible: the account row, its sessions and its SSO binding all go. */
+  retire: (userId: string) => Promise<boolean>;
 };
 
 type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
@@ -172,6 +175,12 @@ export function useUsers({ onUnauthorized }: Props): UsersState {
     [mutate],
   );
 
+  const retire = React.useCallback(
+    (userId: string) =>
+      mutate(() => deleteUser(userId), "The account was retired.", "Failed to retire the account."),
+    [mutate],
+  );
+
   return {
     users,
     loading,
@@ -184,5 +193,6 @@ export function useUsers({ onUnauthorized }: Props): UsersState {
     setRole,
     setDisabled,
     resetPassword,
+    retire,
   };
 }

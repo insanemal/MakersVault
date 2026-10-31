@@ -15,9 +15,9 @@ from typing import Optional
 from argon2 import PasswordHasher
 from argon2.exceptions import Argon2Error
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
-from models import User
+from models import MfaRecoveryCode, OidcIdentity, User, UserSession
 
 ADMIN_ROLE = "admin"
 EDITOR_ROLE = "editor"
@@ -236,6 +236,23 @@ def count_enabled_admins(session: Session, exclude_user_id: Optional[str] = None
     return len(list(session.exec(stmt).all()))
 
 
+def _guard_last_admin(session: Session, user: User, stays_viable: bool) -> None:
+    """Refuse a change that would leave no enabled administrator.
+
+    The single copy of the invariant: `update_user` calls it with the viability
+    of the state the account would have after the patch, `delete_user` with an
+    unconditional False, because a deleted account is never viable. The target is
+    excluded from the count of the others and the read shares the caller's
+    transaction, so the decision and the write see one consistent state.
+    """
+    if (
+        is_viable_admin(user)
+        and not stays_viable
+        and count_enabled_admins(session, exclude_user_id=user.id) == 0
+    ):
+        raise LastAdmin("at least one enabled administrator is required")
+
+
 def update_user(
     session: Session,
     user_id: str,
@@ -249,30 +266,54 @@ def update_user(
     is not in `ROLES`, and `LastAdmin` when the change would demote or disable
     the last enabled administrator.
 
-    The guard reads the post-change viability of the target and excludes the
-    target from the count of the others, in the same transaction as the
-    mutation, so the decision and the write see one consistent state. Two
-    concurrent demotions of the last two admins can still both pass the count
-    check (SQLite serialises commits, not these reads); that is accepted for a
-    self-hosted deployment and documented in docs/PERMISSIONS.md.
+    The shared `_guard_last_admin` reads the post-change viability of the target
+    and excludes the target from the count of the others, in the same
+    transaction as the mutation, so the decision and the write see one
+    consistent state. Two concurrent demotions of the last two admins can still
+    both pass the count check (SQLite serialises commits, not these reads); that
+    is accepted for a self-hosted deployment and documented in
+    docs/PERMISSIONS.md.
     """
     user = get_user(session, user_id)
     if user is None:
         raise UnknownAccount("no such user")
     new_role = _clean_role(role) if role is not None else user.role
     new_disabled = user.disabled if disabled is None else (1 if disabled else 0)
-    stays_viable = new_role == ADMIN_ROLE and not new_disabled
-    loses_last_admin = (
-        is_viable_admin(user)
-        and not stays_viable
-        and count_enabled_admins(session, exclude_user_id=user.id) == 0
-    )
-    if loses_last_admin:
-        raise LastAdmin("at least one enabled administrator is required")
+    _guard_last_admin(session, user, stays_viable=new_role == ADMIN_ROLE and not new_disabled)
     user.role = new_role
     user.disabled = new_disabled
     user.updated_at = _now_iso()
     session.add(user)
+    session.flush()
+    return user
+
+
+def delete_user(session: Session, user_id: str) -> User:
+    """Delete one account for good; the caller commits.
+
+    Raises `UnknownAccount` for a missing id and `LastAdmin` when the target is
+    the deployment's last enabled administrator. `update_user` and this share
+    `_guard_last_admin`, so there is one copy of the invariant; here
+    `stays_viable` is unconditionally False, because a deleted account cannot
+    administer anything.
+
+    The audit log needs no protection: `audit_events.actor` is a username
+    SNAPSHOT and `actor_user_id` is a nullable non-FK, so the rows this account
+    wrote stay readable and attributed. They are deliberately NOT touched.
+
+    FK order matters (`PRAGMA foreign_keys=ON`): recovery codes, sessions and
+    SSO identities reference `users.id` through plain NO ACTION foreign keys, so
+    each child set is deleted before the account row itself or the delete fails.
+    `project.owner_id` is `ON DELETE SET NULL`; the database orphans those
+    projects on its own and this function leaves them alone.
+    """
+    user = get_user(session, user_id)
+    if user is None:
+        raise UnknownAccount("no such user")
+    _guard_last_admin(session, user, stays_viable=False)
+    for child_model in (MfaRecoveryCode, UserSession, OidcIdentity):
+        session.exec(delete(child_model).where(child_model.user_id == user.id))
+    session.delete(user)
     session.flush()
     return user
 

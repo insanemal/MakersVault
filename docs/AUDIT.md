@@ -67,7 +67,7 @@ could honestly reconstruct.
 
 ## The action taxonomy
 
-`audit.ACTIONS` holds exactly these 49 strings. Action names are stable and
+`audit.ACTIONS` holds exactly these 50 strings. Action names are stable and
 `namespace.verb`; a reader of a row does not need the code to know what it means.
 
 | Action | Route(s) that emit it | `target` | `detail` | Failure |
@@ -94,6 +94,7 @@ could honestly reconstruct.
 | `user.disable` | `PATCH /users/{user_id}` (only when `disabled` goes false -> true) | username | `{"from", "to"}` booleans | fail-closed |
 | `user.enable` | `PATCH /users/{user_id}` (only when `disabled` goes true -> false) | username | `{"from", "to"}` booleans | fail-closed |
 | `user.password_reset` | `POST /users/{user_id}/password` | username | `{"user_id", "sessions_revoked", "reset_disabled", "granted_local_login"}` - per the target's state before the write; never the password or a hash | fail-closed |
+| `user.delete` | `DELETE /users/{user_id}` | username | `{"role", "user_id"}` of the retired account; never a password or a hash | fail-closed |
 | `library.scan.start` | `POST /library/scan` | `"library"` | none | fail-loud |
 | `login.succeeded` | `POST /login` | the real username | `{"kind", "client_ip"}` | fail-closed |
 | `first_run.setup` | `POST /auth/first-run/setup` | the username the setup chose | `{"user_id", "username", "role", "source", "break_glass_sessions_revoked", "flag"}` | fail-closed |
@@ -195,8 +196,8 @@ snapshot: the trash keeps it restorable, so it stays `asset.delete` alone.
 The rule `assert_audit_coverage()` enforces: **every route in
 `permissions.ROUTE_PERMISSIONS` whose method is not `GET` must be in
 `ROUTE_ACTIONS` or in `EXEMPT_ROUTES` with a non-empty reason.** `GET` routes are
-out of scope by construction: they change nothing. The matrix has 93 routes, 37
-of them `GET`; the remaining 56 split into 42 audited keys and 14 exempt keys.
+out of scope by construction: they change nothing. The matrix has 94 routes, 37
+of them `GET`; the remaining 57 split into 43 audited keys and 14 exempt keys.
 
 The guard also refuses stale keys (an entry for a route that no longer exists), a
 key in both tables, an action that is not in `ACTIONS`, and an exemption without
@@ -454,7 +455,9 @@ created the account.
 same reason `sessions.username` is: the row is a historical record and must still
 read correctly after the account is renamed, re-roled or deleted. `actor_role` is
 what the actor was allowed to do when they did it, not what they are now - a join
-to `users` would silently rewrite history.
+to `users` would silently rewrite history. `actor_user_id` is a plain nullable
+column with no foreign key, so retiring an account (`user.delete`) leaves every
+row it wrote intact and attributed.
 
 Authentication disabled is a deliberate deployment mode, not a bypass: it must
 keep working, so `context_for` returns the fixed `local` principal instead of

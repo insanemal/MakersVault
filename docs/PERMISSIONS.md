@@ -42,7 +42,7 @@ unknown or blank ranks as `public`, i.e. it is denied even reads - fail closed.
 | Manage retention, delete a snapshot, read scheduler status |  yes  |   no   |     no      |   no   |
 | Change storage / mount-import settings               |  yes  |   no   |     no      |   no   |
 | List and revoke any user's sessions                  |  yes  |   no   |     no      |   no   |
-| Create users, set roles, disable accounts            |  yes  |   no   |     no      |   no   |
+| Create, re-role, disable or retire accounts          |  yes  |   no   |     no      |   no   |
 | Read the audit log                                   |  yes  |   no   |     no      |   no   |
 | Purge the trash                                      |  yes  |   no   |     no      |   no   |
 
@@ -237,8 +237,8 @@ are in
 
 ## The route matrix
 
-Paths are FastAPI templates exactly as declared. 93 routes: 11 public, 33 read,
-19 contribute, 13 write, 17 admin.
+Paths are FastAPI templates exactly as declared. 94 routes: 11 public, 33 read,
+19 contribute, 13 write, 18 admin.
 
 The collection/instance templates are deliberately asymmetric: the collection is
 `/projects` while one project is `/project/{project_id}`, exactly like `/folders`
@@ -363,6 +363,7 @@ out of the library, renames a file the library owns, or rescans the volume.
 | GET    | `/users`                       | user administration |
 | PATCH  | `/users/{user_id}`             | user administration (including role changes) |
 | POST   | `/users/{user_id}/password`    | user administration: an administrator replacing a password is a re-credential write, and it revokes the target's other sessions |
+| DELETE | `/users/{user_id}`             | retiring an account is irreversible and takes its sessions, SSO binding and recovery codes with it; the audit rows it already wrote keep their username snapshot |
 | GET    | `/users/{user_id}/sessions`    | session administration over another principal |
 | DELETE | `/sessions/{session_id}`       | revoking another principal's device is administration |
 | POST   | `/trash/purge`                 | destroying deleted data is irreversible |
@@ -528,6 +529,19 @@ and the audit row records which one was used. A reset changes neither `role` nor
 `disabled`, so the last-admin guard cannot apply to it; instead every session of
 the target is revoked except the caller's own, so the session an admin is typing
 in survives their own reset and a compromised member device does not.
+
+**Retiring an account (admin only):** `DELETE /users/{user_id}` answers 204
+with no body and is **irreversible**: the account row goes for good, and with it
+the sessions, the SSO binding and any unused MFA recovery codes that belonged to
+it. Projects it owned survive - `project.owner_id` is `ON DELETE SET NULL`, so
+they are orphaned rather than destroyed. The last-admin guard applies to this
+path too and is the *same* guard as above, with the target's post-change
+viability unconditionally false: retiring the deployment's last enabled
+administrator is a 409 with the same
+`"at least one enabled administrator is required"` sentence. The account's audit
+rows are **not** touched and stay fully attributed - `audit_events.actor` is a
+username snapshot taken when each row was written and `actor_user_id` is a
+nullable non-key, so history still names who did what after the account is gone.
 
 **Accepted risk (not fixed): a TOCTOU window on concurrent demotions.** Two
 requests that demote the last two admins can both read a count that still

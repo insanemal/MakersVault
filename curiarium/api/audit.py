@@ -75,6 +75,10 @@ USER_ENABLE = "user.enable"
 # The admin password reset (Mf-bj51). One row for a re-credential write plus the
 # session revocations it caused; never a password or a hash.
 USER_PASSWORD_RESET = "user.password_reset"
+# Retiring an account (Mf-rnrn): irreversible, so it gets its own row rather than
+# riding on `user.disable`. The target username is the snapshot the audit rows it
+# already wrote keep, and the detail names the row that is gone.
+USER_DELETE = "user.delete"
 LIBRARY_SCAN_START = "library.scan.start"
 LOGIN_SUCCEEDED = "login.succeeded"
 # An SSO login is its own action pair rather than a `kind` on login.succeeded:
@@ -144,6 +148,7 @@ ACTIONS: frozenset[str] = frozenset({
     USER_DISABLE,
     USER_ENABLE,
     USER_PASSWORD_RESET,
+    USER_DELETE,
     LIBRARY_SCAN_START,
     LOGIN_SUCCEEDED,
     LOGIN_OIDC_SUCCEEDED,
@@ -379,6 +384,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], tuple[str, ...]] = {
     ("POST", "/snapshots/retention"): (SETTINGS_SNAPSHOT_RETENTION_UPDATE,),
     ("POST", "/users"): (USER_CREATE,),
     ("PATCH", "/users/{user_id}"): (USER_ROLE_CHANGE, USER_DISABLE, USER_ENABLE),
+    # Retiring an account is its own action: nothing about it is a patch, and the
+    # rows it already wrote keep their `actor` snapshot (Mf-rnrn).
+    ("DELETE", "/users/{user_id}"): (USER_DELETE,),
     # A sub-resource rather than a `password` field on the PATCH: one route, one
     # action, one row (Mf-bj51).
     ("POST", "/users/{user_id}/password"): (USER_PASSWORD_RESET,),

@@ -89,3 +89,17 @@ export async function resetUserPassword(userId: string, body: PasswordReset): Pr
   });
   if (!res.ok) throw await refusal(res, "Failed to set the password");
 }
+
+/**
+ * Retires an account for good. The API answers 204 with no body, so there is
+ * nothing to parse. A 409 here is the last-admin refusal - the server's own
+ * sentence ("at least one enabled administrator is required") has to reach the
+ * admin, which is exactly what `refusal` is for.
+ */
+export async function deleteUser(userId: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw await refusal(res, "Failed to retire the account");
+}

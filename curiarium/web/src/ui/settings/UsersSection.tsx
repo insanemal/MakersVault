@@ -8,6 +8,7 @@ import {
   type UserSession,
 } from "../../lib/api";
 import type { Role } from "../../lib/auth";
+import ConfirmDialog from "../ConfirmDialog";
 import SectionHeader from "./SectionHeader";
 import { formatLastUsed, sessionDeviceLabel } from "./SessionsSection";
 import { useUsers } from "./useUsers";
@@ -156,6 +157,7 @@ export default function UsersSection({ onBack, onUnauthorized, username = null }
   const [allowSso, setAllowSso] = React.useState(false);
 
   const [sessionsFor, setSessionsFor] = React.useState<string | null>(null);
+  const [pendingRetire, setPendingRetire] = React.useState<User | null>(null);
 
   const openReset = (user: User) => {
     setResetFor(current => (current === user.id ? null : user.id));
@@ -383,6 +385,14 @@ export default function UsersSection({ onBack, onUnauthorized, username = null }
               >
                 Sessions
               </button>
+              <button
+                type="button"
+                className="text-sm px-3 py-2 rounded-md border border-panel-strong disabled:opacity-60"
+                disabled={users.busy}
+                onClick={() => setPendingRetire(user)}
+              >
+                Retire
+              </button>
             </div>
           </div>
 
@@ -451,6 +461,23 @@ export default function UsersSection({ onBack, onUnauthorized, username = null }
           )}
         </div>
       ))}
+
+      {/* Retiring is irreversible, so it is confirmed like a snapshot delete:
+          the dialog names the account and the row only disappears on success. */}
+      {pendingRetire !== null && (
+        <ConfirmDialog
+          title={`Retire ${pendingRetire.username}?`}
+          body="The account is deleted for good: its password, sessions, SSO binding and unused recovery codes all go with it. The audit log keeps their name on everything they did."
+          confirmLabel="Retire account"
+          danger
+          busy={users.busy}
+          onConfirm={async () => {
+            await users.retire(pendingRetire.id);
+            setPendingRetire(null);
+          }}
+          onCancel={() => setPendingRetire(null)}
+        />
+      )}
     </div>
   );
 }

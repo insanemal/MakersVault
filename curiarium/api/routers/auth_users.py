@@ -366,6 +366,34 @@ def update_user(user_id: str, body: UserUpdate, request: Request, context: Optio
     return result
 
 
+@router.delete("/users/{user_id}", status_code=204)
+def delete_user(user_id: str, request: Request, context: Optional[AuthContext] = Depends(require_admin)):
+    """Retire an account for good (Mf-rnrn).
+
+    204 and never a body: the account is gone, so there is nothing to describe
+    and no serialiser a credential could leak through. A 409 here is the shared
+    last-admin refusal - an administrator cannot retire the deployment's last
+    enabled administrator, because the break-glass env admin stops working once
+    the users table is non-empty. The audit row is staged in the same
+    transaction as the delete, and the rows the retired account already wrote
+    keep their `actor` username snapshot.
+    """
+    if not auth.AUTH_ENABLED:
+        raise HTTPException(status_code=503, detail=AUTH_NOT_CONFIGURED)
+    with Session(engine) as s:
+        try:
+            user = accounts.delete_user(s, user_id)
+        except accounts.AccountError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+        audit.stage(
+            s,
+            audit.context_for(request, context),
+            audit.Event(audit.USER_DELETE, user.username, {"role": user.role, "user_id": user.id}),
+        )
+        s.commit()
+    return Response(status_code=204)
+
+
 @router.post("/users/{user_id}/password", status_code=204)
 def reset_user_password(
     user_id: str,

@@ -109,6 +109,9 @@ DISABLED_503_KEYS = {
     ("GET", "/users"),
     ("POST", "/users"),
     ("PATCH", "/users/{user_id}"),
+    # Retiring an account refuses while authentication is off too: it needs a real
+    # caller to name in the audit row and to protect from the last-admin guard.
+    ("DELETE", "/users/{user_id}"),
     # The password reset refuses while authentication is off, like the rest of
     # the /users block: it needs a real caller to spare their own session.
     ("POST", "/users/{user_id}/password"),
@@ -805,6 +808,13 @@ def call_update_user(client: TestClient, headers: dict[str, str], ids: Ids, monk
     return client.patch(f"/users/{ids.viewer_id or PLACEHOLDER_USER_ID}", json={"disabled": True}, headers=headers)
 
 
+def call_delete_user(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
+    # A viewer is never the last enabled admin, so this is the permitted path.
+    # Every spec runs on its own function-scoped fixture (accounts are truncated
+    # per test), so retiring the viewer cannot strand a later call.
+    return client.delete(f"/users/{ids.viewer_id or PLACEHOLDER_USER_ID}", headers=headers)
+
+
 def call_reset_password(client: TestClient, headers: dict[str, str], ids: Ids, monkeypatch: pytest.MonkeyPatch) -> Response:
     # The same password the fixture signed the viewer in with: a new one would
     # stale the shared seed and revoke the sessions later sweeps rely on (A5).
@@ -1133,6 +1143,7 @@ CALLS: dict[tuple[str, str], CallSpec] = {
     ("POST", "/users"): call_create_user,
     ("GET", "/users"): call_list_users,
     ("PATCH", "/users/{user_id}"): call_update_user,
+    ("DELETE", "/users/{user_id}"): call_delete_user,
     ("POST", "/users/{user_id}/password"): call_reset_password,
     ("GET", "/users/{user_id}/sessions"): call_list_user_sessions,
     ("DELETE", "/sessions/{session_id}"): call_delete_session,
@@ -1227,6 +1238,8 @@ EXPECTED_STATUS: dict[tuple[str, str], int] = {
     ("POST", "/users"): 201,
     ("GET", "/users"): 200,
     ("PATCH", "/users/{user_id}"): 200,
+    # 204: the account is gone, so there is nothing left to describe.
+    ("DELETE", "/users/{user_id}"): 204,
     # 204: the reset never echoes anything, so there is no body a password
     # could leak through.
     ("POST", "/users/{user_id}/password"): 204,
@@ -1386,7 +1399,7 @@ def test_a_route_declared_on_the_app_instead_of_a_router_is_caught() -> None:
 
 
 def test_the_matrix_is_the_documented_size() -> None:
-    """The matrix is pinned at 93 routes - 11 public / 33 read / 19 contribute / 13 write / 17 admin.
+    """The matrix is pinned at 94 routes - 11 public / 33 read / 19 contribute / 13 write / 18 admin.
 
     A new route means updating this pin and docs/PERMISSIONS.md together. The
     per-level counts are pinned as well as the total on purpose: a route that
@@ -1396,13 +1409,13 @@ def test_the_matrix_is_the_documented_size() -> None:
         level: len(keys_at(level))
         for level in (permissions.PUBLIC, permissions.READ, permissions.CONTRIBUTE, permissions.WRITE, permissions.ADMIN)
     }
-    assert len(permissions.ROUTE_PERMISSIONS) == 93, counts
+    assert len(permissions.ROUTE_PERMISSIONS) == 94, counts
     assert counts == {
         permissions.PUBLIC: 11,
         permissions.READ: 33,
         permissions.CONTRIBUTE: 19,
         permissions.WRITE: 13,
-        permissions.ADMIN: 17,
+        permissions.ADMIN: 18,
     }, counts
 
 
@@ -1651,6 +1664,7 @@ def test_the_503_set_is_exactly_the_documented_endpoints() -> None:
         ("GET", "/users"),
         ("POST", "/users"),
         ("PATCH", "/users/{user_id}"),
+        ("DELETE", "/users/{user_id}"),
         ("POST", "/users/{user_id}/password"),
         ("GET", "/auth/oidc/status"),
         ("GET", "/auth/oidc/start"),

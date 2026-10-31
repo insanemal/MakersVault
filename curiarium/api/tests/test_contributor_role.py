@@ -465,10 +465,11 @@ def test_a_contributor_action_is_audited_with_the_contributor_role(client: TestC
 
     # The split changed because creation is audited now (Mf-0u1y), not because
     # a level moved: the upload route moved from exempt to audited, and the
-    # coverage guard sees 42 audited / 14 exempt routes. Mf-lyj2 added the
-    # first-run setup route to the audited half (41 -> 42), which is why the
-    # number here is not the contributor ticket's.
+    # coverage guard sees 43 audited / 14 exempt routes. Mf-lyj2 added the
+    # first-run setup route to the audited half (41 -> 42) and Mf-rnrn the
+    # account retirement route (42 -> 43), which is why the number here is not
+    # the contributor ticket's.
     assert audit.ROUTE_ACTIONS[("POST", "/upload")] == (audit.ASSET_CREATE,)
     assert audit.assert_audit_coverage() is audit.ROUTE_ACTIONS
-    assert len(audit.ROUTE_ACTIONS) == 42
+    assert len(audit.ROUTE_ACTIONS) == 43
     assert len(audit.EXEMPT_ROUTES) == 14
