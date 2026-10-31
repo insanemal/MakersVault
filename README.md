@@ -97,8 +97,32 @@ Open <http://localhost:5173>.
 
 ### Setting up the .env file
 
-Copy `curiarium/api/.env.example` to `curiarium/.env` and edit the marked lines. A
-working baseline:
+Copy `curiarium/api/.env.example` to `curiarium/.env` and edit the marked lines.
+
+### Generate the secrets, do not invent them
+
+Four kinds of value end up in that file, and only one kind is generated here:
+
+| Value | Where it comes from |
+|---|---|
+| `AUTH_SECRET` | **generated** below — signs session tokens; at least 32 bytes |
+| `SNAPSHOT_BTRFS_SIDECAR_TOKEN` | **generated**, and identical in both services that share it |
+| `AUTH_PASSWORD` | **chosen by you**, memorised, and deleted once a real admin exists |
+| `OIDC_CLIENT_SECRET` | **issued by your identity provider** — paste it, do not make one up |
+| `MAKERWORLD_COOKIE`, `THINGIVERSE_COOKIE` | **pasted from the site**, optional; they only raise public rate limits |
+
+Generate the signing secret once. Re-running this is safe: it never rotates a secret
+that is already there, because appending a second `AUTH_SECRET` silently invalidates
+every session and refresh token.
+
+```bash
+umask 077                                     # the file is never briefly world-readable
+touch curiarium/.env && chmod 600 curiarium/.env
+grep -qs '^AUTH_SECRET=' curiarium/.env \
+  || printf 'AUTH_SECRET=%s\n' "$(openssl rand -hex 32)" >> curiarium/.env
+```
+
+A working baseline:
 
 ```yaml
 PUID=1000

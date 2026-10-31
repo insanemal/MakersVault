@@ -247,3 +247,35 @@ def test_refresh_token_ttl_matches_auth_default() -> None:
 
     row = _configuration_row("AUTH_REFRESH_TTL_SECONDS")
     assert f"`{default}`" in row, f"CONFIGURATION.md AUTH_REFRESH_TTL_SECONDS row does not show {default}: {row}"
+
+
+def test_the_readme_says_how_to_generate_the_signing_secret() -> None:
+    """Issue #6, from an outside contributor: the quick start never said how.
+
+    A wrong AUTH_SECRET is the one onboarding mistake with no error message — the
+    app starts, sessions work, and the mistake only surfaces as an
+    InsecureKeyLengthWarning or an InvalidKeyError much later. So the command
+    belongs next to the value it produces, not only in the troubleshooting
+    section of CONFIGURATION.md.
+    """
+    text = _read_text(README_PATH)
+
+    assert "openssl rand -hex 32" in text, "the README no longer shows how to generate AUTH_SECRET"
+    assert "umask 077" in text, "the recipe must set a restrictive umask before writing the file"
+    assert "grep -qs '^AUTH_SECRET='" in text, "the recipe must be idempotent: a re-run must not rotate the secret"
+
+
+def test_the_readme_separates_generated_from_issued_secrets() -> None:
+    """"Rinse and repeat for other secrets" is wrong, and it is what got asked for.
+
+    AUTH_SECRET and the sidecar token are generated; AUTH_PASSWORD is chosen and
+    later deleted; the OIDC secret is issued by the provider and must be pasted;
+    the site cookies are copied from a browser. A reader who generates all of
+    them invents an OIDC secret that will never authenticate.
+    """
+    text = _read_text(README_PATH)
+    section = text[text.index("### Generate the secrets") : text.index("A working baseline")]
+
+    for value in ("AUTH_SECRET", "SNAPSHOT_BTRFS_SIDECAR_TOKEN", "AUTH_PASSWORD", "OIDC_CLIENT_SECRET"):
+        assert value in section, f"the secrets table no longer names {value}"
+    assert "issued by your identity provider" in section
