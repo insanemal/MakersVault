@@ -2,6 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Accents follow the brand purple lockup (mark #b76eff, accent #9d4edd, glow
+   #c77dff). Green now lives only in `html.theme-neon`. */
 :root {
   color-scheme: light dark;
   --mv-bg: #f8fafc;
@@ -14,10 +16,10 @@
   --mv-text: #0f172a;
   --mv-text-muted: #64748b;
   --mv-text-subtle: #94a3b8;
-  --mv-accent: #10b981;
-  --mv-accent-strong: #059669;
-  --mv-accent-soft: rgba(16, 185, 129, 0.16);
-  --mv-accent-border: #a7f3d0;
+  --mv-accent: #8b3cc7;
+  --mv-accent-strong: #5a189a;
+  --mv-accent-soft: rgba(157, 78, 221, 0.16);
+  --mv-accent-border: #d8b4fe;
   --mv-accent-contrast: #ffffff;
   --mv-model-color: #cbd5e1;
   --mv-model-emissive: #94a3b8;
@@ -34,11 +36,12 @@ html.dark {
   --mv-text: #f8fafc;
   --mv-text-muted: #94a3b8;
   --mv-text-subtle: #64748b;
-  --mv-accent: #34d399;
-  --mv-accent-strong: #10b981;
-  --mv-accent-soft: rgba(16, 185, 129, 0.2);
-  --mv-accent-border: #065f46;
-  --mv-accent-contrast: #ffffff;
+  --mv-accent: #c77dff;
+  --mv-accent-strong: #e4c8ff;
+  --mv-accent-soft: rgba(199, 125, 255, 0.2);
+  --mv-accent-border: #6b3d94;
+  /* Dark text: white on #c77dff is 2.69:1 and fails AA. */
+  --mv-accent-contrast: #0b0316;
   --mv-model-color: #e2e8f0;
   --mv-model-emissive: #475569;
 }

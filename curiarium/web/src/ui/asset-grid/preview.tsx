@@ -91,7 +91,7 @@ export function PreparedPrintSummary({
     preparedTime(prepared),
   ];
   return (
-    <div className="flex items-start justify-between gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-2 text-xs text-emerald-950 dark:text-emerald-100">
+    <div className="flex items-start justify-between gap-2 rounded-md border border-accent-soft bg-accent-soft px-2.5 py-2 text-xs text-foreground">
       <span>
         <span className="font-semibold">{preparedTitle(prepared)}</span>
         <span> · {facts.join(" · ")}</span>

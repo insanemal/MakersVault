@@ -99,4 +99,9 @@ export default defineConfig({
   preview: {
     allowedHosts: resolvedAllowedHosts,
   },
+  test: {
+    // Vitest blanks CSS imports by default; `palette.test.ts` reads the real
+    // stylesheet through Vite's `?raw` query, so that file is processed.
+    css: { include: [/src\/index\.css/] },
+  },
 });

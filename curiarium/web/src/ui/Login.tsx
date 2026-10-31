@@ -8,6 +8,7 @@ import {
   ssoErrorCopy,
   type MfaChallenge,
 } from "../lib/api";
+import { logoForTheme } from "../lib/brand";
 import { ResolvedTheme } from "../lib/settings";
 
 type Props = {
@@ -16,21 +17,6 @@ type Props = {
   theme: ResolvedTheme;
   /** A frozen `sso_error` value from the redirect fragment, or null. */
   ssoError?: string | null;
-};
-
-const logoForTheme = (theme: ResolvedTheme) => {
-  switch (theme) {
-    case "neon":
-      return "/img/green_theme/Neon_Green_bgrm.png";
-    case "purple":
-      return "/img/purple_theme/Neon_Purple_logo_bgrm.png";
-    case "blue":
-      return "/img/blue_theme/Blue_Theme_logo_bgrm.png";
-    case "dark":
-      return "/img/whitelogo.png";
-    default:
-      return "/img/blacklogo.png";
-  }
 };
 
 export default function Login({ onSuccess, apiUp, theme, ssoError }: Props) {

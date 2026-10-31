@@ -29,6 +29,9 @@ export type ThemeId = "system" | "light" | "dark" | "neon" | "purple" | "blue";
 export type ResolvedTheme = "light" | "dark" | "neon" | "purple" | "blue";
 export type ThemeOption = { id: ThemeId; label: string; description: string };
 
+// The brand purple lockup is the fresh-install default; a stored choice always wins.
+export const DEFAULT_THEME_ID: ThemeId = "purple";
+
 export const THEME_OPTIONS: ThemeOption[] = [
   { id: "system", label: "System", description: "Match your device preference." },
   { id: "light", label: "Light", description: "Bright backgrounds, dark text." },
@@ -99,7 +102,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     selected: "lightburn",
   },
   theme: {
-    selected: "system",
+    selected: DEFAULT_THEME_ID,
   },
   makerworld: {
     cookie: "",

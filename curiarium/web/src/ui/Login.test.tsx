@@ -185,6 +185,16 @@ describe("Login SSO error copy", () => {
   });
 });
 
+describe("Login brand lockup", () => {
+  it("shows the purple lockup on the purple theme", async () => {
+    render(<Login onSuccess={vi.fn()} apiUp={true} theme="purple" ssoError={null} />);
+
+    // Purple is the brand default, so its lockup is the one a fresh install sees.
+    const logo = await screen.findByRole("img", { name: "Curiarium" });
+    expect(logo.getAttribute("src")).toBe("/img/purple_theme/Neon_Purple_logo_bgrm.png");
+  });
+});
+
 describe("Login local password form", () => {
   it("still submits and hands the token pair to onSuccess", async () => {
     loginMock.mockResolvedValue({ token: "access-1", expires_in: 900, refresh_token: "refresh-1" });

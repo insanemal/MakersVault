@@ -30,7 +30,8 @@ import {
   storeRefreshToken,
   storeToken,
 } from "../lib/auth";
-import { type AppSettings, type ResolvedTheme, loadSettings, resolveTheme, saveSettings } from "../lib/settings";
+import { logoForTheme } from "../lib/brand";
+import { type AppSettings, loadSettings, resolveTheme, saveSettings } from "../lib/settings";
 import { type LibraryMode, loadMode, saveMode } from "../lib/mode";
 import { useSessionRole } from "./useSessionRole";
 // Imported from the domain module, not the `../lib/api` barrel: `App.role.test.tsx`
@@ -97,21 +98,6 @@ function clearSsoFragment(): void {
   if (typeof window === "undefined") return;
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
 }
-
-const logoForTheme = (theme: ResolvedTheme) => {
-  switch (theme) {
-    case "neon":
-      return "/img/green_theme/Neon_Green_bgrm.png";
-    case "purple":
-      return "/img/purple_theme/Neon_Purple_logo_bgrm.png";
-    case "blue":
-      return "/img/blue_theme/Blue_Theme_logo_bgrm.png";
-    case "dark":
-      return "/img/whitelogo.png";
-    default:
-      return "/img/blacklogo.png";
-  }
-};
 
 export default function App() {
   const [token, setToken] = React.useState<string | null>(() => readToken());

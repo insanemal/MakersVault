@@ -1,4 +1,4 @@
-import { THEME_OPTIONS, type AppSettings, type ThemeId } from "../../lib/settings";
+import { DEFAULT_THEME_ID, THEME_OPTIONS, type AppSettings, type ThemeId } from "../../lib/settings";
 import SectionHeader from "./SectionHeader";
 
 const THEME_SWATCHES: Record<ThemeId, string> = {
@@ -60,7 +60,14 @@ export default function ThemeSection({ settings, onChange, onBack }: Props) {
                 style={{ backgroundImage: THEME_SWATCHES[option.id] }}
               />
               <div>
-                <div className="font-medium">{option.label}</div>
+                <div className="flex items-center gap-2 font-medium">
+                  <span>{option.label}</span>
+                  {option.id === DEFAULT_THEME_ID && (
+                    <span className="inline-flex items-center rounded-full border border-accent-soft bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold leading-none text-foreground">
+                      Default
+                    </span>
+                  )}
+                </div>
                 <div className="text-sm text-muted">{option.description}</div>
               </div>
             </label>
