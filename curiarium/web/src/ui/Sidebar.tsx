@@ -171,7 +171,8 @@ export default function Sidebar({
     setEditing(null);
     setCreating(true);
     setNewName("");
-    setNewParent(parentId ?? (selectedId || null));
+    // null is the root, so the toolbar's New folder never nests under the selection.
+    setNewParent(parentId);
   };
   const create = async () => {
     if (!newName.trim()) return;

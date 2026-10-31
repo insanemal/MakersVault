@@ -35,11 +35,12 @@ vi.mock("../lib/uploadTree", async importOriginal => {
 
 import Sidebar from "./Sidebar";
 import Toaster from "./Toaster";
-import { deleteFolder, getFolderDeletePreview, listFolders } from "../lib/api";
+import { createFolder, deleteFolder, getFolderDeletePreview, listFolders } from "../lib/api";
 import { uploadEntriesToFolder } from "../lib/uploadTree";
 import { resetToasts } from "../lib/toast";
 
 const listFoldersMock = vi.mocked(listFolders);
+const createFolderMock = vi.mocked(createFolder);
 const deleteFolderMock = vi.mocked(deleteFolder);
 const previewMock = vi.mocked(getFolderDeletePreview);
 const uploadEntriesMock = vi.mocked(uploadEntriesToFolder);
@@ -515,6 +516,80 @@ describe("Sidebar write controls by role", () => {
 
     await waitFor(() => expect(uploadEntriesMock).toHaveBeenCalledTimes(1));
     expect(uploadEntriesMock.mock.calls[0][1]).toBe("f1");
+  });
+});
+
+describe("Sidebar new folder parent", () => {
+  beforeEach(() => {
+    resetToasts();
+    listFoldersMock.mockReset();
+    listFoldersMock.mockResolvedValue(folders);
+    createFolderMock.mockReset();
+    createFolderMock.mockResolvedValue({ id: "new", name: "new", tags: [] });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  /** The open `<details>` menu for a folder, so items can be queried inside it. */
+  function folderMenu(folderName: string): HTMLElement {
+    const summary = screen.getByLabelText(`Actions for ${folderName}`);
+    fireEvent.click(summary);
+    const details = summary.closest("details");
+    if (!details) throw new Error(`No action menu for ${folderName}`);
+    return details;
+  }
+
+  /** Fill the open create dialog and submit it. */
+  function submitCreate(dialog: HTMLElement, name: string) {
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: name } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+  }
+
+  it("creates three toolbar folders at the root even while a folder is selected", async () => {
+    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    await screen.findByText("Keep");
+
+    for (const [i, name] of ["One", "Two", "Three"].entries()) {
+      fireEvent.click(screen.getByTitle("New folder"));
+      const dialog = await screen.findByRole("dialog", { name: "Create folder" });
+      submitCreate(dialog, name);
+      await waitFor(() => expect(createFolderMock).toHaveBeenCalledTimes(i + 1));
+    }
+
+    // The toolbar's New folder is always top level: no folder id, no nesting.
+    expect(createFolderMock.mock.calls).toEqual([
+      ["One", [], undefined],
+      ["Two", [], undefined],
+      ["Three", [], undefined],
+    ]);
+  });
+
+  it("pre-selects the folder when a subfolder is created from its menu", async () => {
+    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    await screen.findByText("Keep");
+
+    fireEvent.click(within(folderMenu("Keep")).getByText("Subfolder"));
+    const dialog = await screen.findByRole("dialog", { name: "Create folder" });
+    submitCreate(dialog, "Child");
+
+    await waitFor(() => expect(createFolderMock).toHaveBeenCalledWith("Child", [], "f1"));
+  });
+
+  it("lets an explicit location in the picker override the default", async () => {
+    render(<Sidebar selectedId="f1" onSelect={vi.fn()} role="editor" />);
+    await screen.findByText("Keep");
+
+    fireEvent.click(screen.getByTitle("New folder"));
+    const dialog = await screen.findByRole("dialog", { name: "Create folder" });
+    const location = within(dialog).getByLabelText("Location") as HTMLSelectElement;
+    expect(location.value).toBe("");
+
+    fireEvent.change(location, { target: { value: "f2" } });
+    submitCreate(dialog, "Elsewhere");
+
+    await waitFor(() => expect(createFolderMock).toHaveBeenCalledWith("Elsewhere", [], "f2"));
   });
 });
 
